@@ -54,7 +54,7 @@ case $PLATFORM in
     TAGS+=(sqlite_icu no_adodb)
   ;;
   windows)
-    EXT=zip
+    # EXT=zip
     BIN=$BIN.exe
   ;;
 esac

@@ -4,21 +4,6 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-    - name: Download Latest Release Zip
-      # You may pin to the exact commit or the version.
-      # uses: creesch/github-latest-release-zip@e361edfc3593d0dc313b8a2f3bbc266fa932c1e4
-      uses: creesch/github-latest-release-zip@v0.1.1
-      with:
-        # The Github user or organization that owns the repository
-        owner: 
-        # The repository name
-        repo: 
-        # Path where the zip needs to be save. Should only be directories and not end in a filename
-        downloadPath: # optional, default is ./
-    - name: Install Go
-      uses: actions/setup-go@v2
-      with:
-        go-version: 1.16.x
     - name: UPX Action
       # You may pin to the exact commit or the version.
       # uses: gacts/upx@65347bae841189e25abe0df3941ce61be5e8bf9c
@@ -30,6 +15,10 @@ jobs:
         dir: # optional
         # Arguments to pass to UPX
         upx_args: 
+    - name: Install Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: 1.16.x
     - name: Checkout code
       uses: actions/checkout@v2
     - name: Unit Tests

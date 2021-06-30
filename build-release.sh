@@ -145,12 +145,12 @@ case $PLATFORM in
 esac
 
 # compress
-case $PLATFORM in
-  linux|windows|darwin)
-    COMPRESSED=$(upx -q -q $BIN|awk '{print $1 " -> " $3 " (" $4 ")"}')
-    echo "COMPRESSED:  $COMPRESSED"
-  ;;
-esac
+# case $PLATFORM in
+#   linux|windows|darwin)
+#     COMPRESSED=$(upx -q -q $BIN|awk '{print $1 " -> " $3 " (" $4 ")"}')
+#     echo "COMPRESSED:  $COMPRESSED"
+#   ;;
+# esac
 
 # check build
 BUILT_VER=$($BIN --version)

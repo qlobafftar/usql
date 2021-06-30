@@ -4,17 +4,6 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-    - name: UPX Action
-      # You may pin to the exact commit or the version.
-      # uses: gacts/upx@65347bae841189e25abe0df3941ce61be5e8bf9c
-      uses: gacts/upx@v1.0.1
-      with:
-        # Input file
-        file: # optional
-        # Input directory
-        dir: # optional
-        # Arguments to pass to UPX
-        upx_args: 
     - name: Install Go
       uses: actions/setup-go@v2
       with:

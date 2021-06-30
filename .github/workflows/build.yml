@@ -13,4 +13,4 @@ jobs:
     - name: Unit Tests
       run: go test -v ./stmt
     - name: Build with "most"
-      run: ./build-release.sh -v
+      run: bash build-release.sh -v

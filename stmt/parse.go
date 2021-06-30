@@ -80,8 +80,8 @@ func readDollarAndTag(r []rune, i, end int) (string, int, bool) {
 	return id, i, true
 }
 
-// readString seeks to the end of a string (depending on the state of b)
-// returning the position and whether or not the string's end was found.
+// readString seeks to the end of a string returning the position and whether
+// or not the string's end was found.
 //
 // If the string's terminator was not found, then the result will be the passed
 // end.
@@ -95,7 +95,10 @@ func readString(r []rune, i, end int, quote rune, tag string) (int, bool) {
 			prev = 0
 			continue
 		case quote == '\'' && c == '\'' && next == '\'':
-		case quote == '\'' && c == '\'' && prev != '\'',
+			i++
+			i++
+			continue
+		case quote == '\'' && c == '\'',
 			quote == '"' && c == '"',
 			quote == '`' && c == '`':
 			return i, true

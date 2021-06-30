@@ -95,7 +95,6 @@ func readString(r []rune, i, end int, quote rune, tag string) (int, bool) {
 			continue
 		case quote == '\'' && c == '\'' && next == '\'':
 			i++
-			i++
 			continue
 		case quote == '\'' && c == '\'',
 			quote == '"' && c == '"',

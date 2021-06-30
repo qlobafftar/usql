@@ -14,3 +14,8 @@ jobs:
       run: go test -v ./stmt
     - name: Build with "most"
       run: bash build-release.sh -v
+    - uses: actions/upload-artifact@v2
+      with:
+        name: release
+        path: /d/a/usql/usql/build/windows/0.0.0-dev/usql-0.0.0-dev-windows-amd64.tar.bz2
+      

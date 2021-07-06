@@ -10,8 +10,8 @@ jobs:
         go-version: 1.16.x
     - name: Checkout code
       uses: actions/checkout@v2
-    - name: Unit Tests
-      run: go test -v ./stmt
+#     - name: Unit Tests
+#       run: go test -v ./stmt
     - name: Build with "most"
       run: bash build-release.sh -v
     - name: Print dir

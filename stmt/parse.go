@@ -87,6 +87,7 @@ func readDollarAndTag(r []rune, i, end int) (string, int, bool) {
 // end.
 func readString(r []rune, i, end int, quote rune, tag string) (int, bool) {
 	var c, next rune
+	i++
 	for ; i < end; i++ {
 		c, next = r[i], grab(r, i+1, end)
 		switch {

@@ -16,7 +16,7 @@ var queryMap = map[string]bool{
 	"SHOW":       true, // show the value of a run-time parameter
 	"ADMIN SHOW": true,
 	"VALUES":     true, // compute a set of rows
-	"LIST":       true, // list permissions, roles, users (cassandra])
+	"LIST":       true, // list permissions, roles, users (cassandra)
 	"EXEC":       true, // execute a stored procedure that returns rows (not postgres)
 }
 
@@ -34,6 +34,11 @@ var execMap = map[string]bool{
 	"DROP KEYSPACE":   true, // drop a keyspace
 	"BEGIN BATCH":     true, // begin batch
 	"APPLY BATCH":     true, // apply batch
+	// sqlserver
+	"CREATE LOGIN":     true, // create login
+	"CREATE PROCEDURE": true, // create procedure
+	"DROP LOGIN":       true, // drop login
+	"DROP PROCEDURE":   true, // drop procedure
 	// ql
 	"BEGIN TRANSACTION": true, // begin batch
 	// postgresql
@@ -124,6 +129,7 @@ var execMap = map[string]bool{
 	"CREATE USER MAPPING":              true, // define a new mapping of a user to a foreign server
 	"CREATE USER":                      true, // define a new database role
 	"CREATE VIEW":                      true, // define a new view
+	"DEALLOCATE ALL":                   true, // deallocate all prepared statements
 	"DEALLOCATE":                       true, // deallocate a prepared statement
 	"DECLARE":                          true, // define a cursor
 	"DELETE":                           true, // delete rows of a table

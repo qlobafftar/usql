@@ -1,10 +1,11 @@
 // Package impala defines and registers usql's Apache Impala driver.
 //
 // See: https://github.com/bippio/go-impala
+// Group: all
 package impala
 
 import (
-	_ "github.com/bippio/go-impala" // DRIVER: impala
+	_ "github.com/bippio/go-impala" // DRIVER
 	"github.com/xo/usql/drivers"
 )
 

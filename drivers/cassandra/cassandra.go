@@ -1,4 +1,4 @@
-// Package cassandra defines and registers usql's Cassandra (cql) driver.
+// Package cassandra defines and registers usql's Cassandra driver.
 //
 // See: https://github.com/MichaelS11/go-cql-driver
 package cassandra
@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"regexp"
@@ -75,7 +76,7 @@ func init() {
 				u.RawQuery = q.Encode()
 			}
 		},
-		Open: func(*dburl.URL) (func(string, string) (*sql.DB, error), error) {
+		Open: func(u *dburl.URL, stdout, stderr func() io.Writer) (func(string, string) (*sql.DB, error), error) {
 			// override cql and gocql loggers
 			l = &logger{debug: debug}
 			gocql.Logger, cql.CqlDriver.Logger = l, log.New(l, "", 0)

@@ -1,5 +1,5 @@
-// Package moderncsqlite defines and registers usql's ModernC SQLite3 driver, a
-// transpilation of SQLite3 to pure Go.
+// Package moderncsqlite defines and registers usql's ModernC SQLite3 driver.
+// Transpilation of SQLite3 to Go.
 //
 // See: https://gitlab.com/cznic/sqlite
 package moderncsqlite
@@ -7,18 +7,19 @@ package moderncsqlite
 import (
 	"context"
 	"database/sql"
+	"io"
 	"strconv"
 
 	"github.com/xo/dburl"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/drivers/sqlite3/sqshared"
-	"modernc.org/sqlite" // DRIVER: moderncsqlite
+	"modernc.org/sqlite" // DRIVER
 )
 
 func init() {
 	drivers.Register("moderncsqlite", drivers.Driver{
 		AllowMultilineComments: true,
-		Open: func(u *dburl.URL) (func(string, string) (*sql.DB, error), error) {
+		Open: func(u *dburl.URL, stdout, stderr func() io.Writer) (func(string, string) (*sql.DB, error), error) {
 			return func(_ string, params string) (*sql.DB, error) {
 				return sql.Open("sqlite", params)
 			}, nil

@@ -1,6 +1,7 @@
 // Package snowflake defines and registers usql's Snowflake driver.
 //
 // See: https://github.com/snowflakedb/gosnowflake
+// Group: all
 package snowflake
 
 import (
@@ -9,7 +10,7 @@ import (
 	"strconv"
 
 	"github.com/sirupsen/logrus"
-	"github.com/snowflakedb/gosnowflake" // DRIVER: snowflake
+	"github.com/snowflakedb/gosnowflake" // DRIVER
 	"github.com/xo/tblfmt"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/drivers/metadata"

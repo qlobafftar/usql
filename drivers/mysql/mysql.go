@@ -1,33 +1,24 @@
 // Package mysql defines and registers usql's MySQL driver.
 //
+// Alias: memsql, SingleStore MemSQL
+// Alias: vitess, Vitess Database
+// Alias: tidb, TiDB
+//
 // See: https://github.com/go-sql-driver/mysql
+// Group: base
 package mysql
 
 import (
 	"io"
 	"strconv"
 
-	"github.com/go-sql-driver/mysql" // DRIVER: mysql
+	"github.com/go-sql-driver/mysql" // DRIVER
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/drivers/metadata"
-	infos "github.com/xo/usql/drivers/metadata/informationschema"
+	mymeta "github.com/xo/usql/drivers/metadata/mysql"
 )
 
 func init() {
-	newReader := infos.New(
-		infos.WithPlaceholder(func(int) string { return "?" }),
-		infos.WithSequences(false),
-		infos.WithCheckConstraints(false),
-		infos.WithCustomClauses(map[infos.ClauseName]string{
-			infos.ColumnsNumericPrecRadix:         "10",
-			infos.FunctionColumnsNumericPrecRadix: "10",
-			infos.ConstraintIsDeferrable:          "''",
-			infos.ConstraintInitiallyDeferred:     "''",
-			infos.ConstraintJoinCond:              "AND r.table_name = f.table_name",
-		}),
-		infos.WithSystemSchemas([]string{"mysql", "information_schema", "performance_schema", "sys"}),
-		infos.WithCurrentSchema("COALESCE(DATABASE(), '%')"),
-	)
 	drivers.Register("mysql", drivers.Driver{
 		AllowMultilineComments: true,
 		AllowHashComments:      true,
@@ -50,10 +41,11 @@ func init() {
 			}
 			return false
 		},
-		NewMetadataReader: newReader,
+		NewMetadataReader: mymeta.NewReader,
 		NewMetadataWriter: func(db drivers.DB, w io.Writer, opts ...metadata.ReaderOption) metadata.Writer {
-			return metadata.NewDefaultWriter(newReader(db, opts...))(db, w)
+			return metadata.NewDefaultWriter(mymeta.NewReader(db, opts...))(db, w)
 		},
-		Copy: drivers.CopyWithInsert(func(int) string { return "?" }),
+		Copy:         drivers.CopyWithInsert(func(int) string { return "?" }),
+		NewCompleter: mymeta.NewCompleter,
 	}, "memsql", "vitess", "tidb")
 }

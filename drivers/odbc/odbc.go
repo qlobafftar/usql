@@ -2,12 +2,13 @@
 // respective platform's standard ODBC packages.
 //
 // See: https://github.com/alexbrainman/odbc
+// Group: all
 package odbc
 
 import (
 	"strings"
 
-	"github.com/alexbrainman/odbc" // DRIVER: odbc
+	"github.com/alexbrainman/odbc" // DRIVER
 	"github.com/xo/usql/drivers"
 )
 

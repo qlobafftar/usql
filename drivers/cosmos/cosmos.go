@@ -1,10 +1,11 @@
 // Package cosmos defines and registers usql's Azure CosmosDB driver.
 //
 // See: https://github.com/btnguyen2k/gocosmos
+// Group: all
 package cosmos
 
 import (
-	_ "github.com/btnguyen2k/gocosmos" // DRIVER: cosmos
+	_ "github.com/btnguyen2k/gocosmos" // DRIVER
 	"github.com/xo/usql/drivers"
 )
 

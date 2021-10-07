@@ -86,17 +86,18 @@ func readDollarAndTag(r []rune, i, end int) (string, int, bool) {
 // If the string's terminator was not found, then the result will be the passed
 // end.
 func readString(r []rune, i, end int, quote rune, tag string) (int, bool) {
-	var c, next rune
+	var prev, c, next rune
 	for ; i < end; i++ {
 		c, next = r[i], grab(r, i+1, end)
 		switch {
-// 		case quote == '\'' && c == '\\':
-// 			i++
-// 			continue
+		case quote == '\'' && c == '\\':
+			i++
+			prev = 0
+			continue
 		case quote == '\'' && c == '\'' && next == '\'':
 			i++
 			continue
-		case quote == '\'' && c == '\'',
+		case quote == '\'' && c == '\'' && prev != '\'',
 			quote == '"' && c == '"',
 			quote == '`' && c == '`':
 			return i, true
@@ -105,6 +106,7 @@ func readString(r []rune, i, end int, quote rune, tag string) (int, bool) {
 				return pos, true
 			}
 		}
+		prev = c
 	}
 	return end, false
 }

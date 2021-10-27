@@ -20,7 +20,7 @@ case "$opt" in
     # get latest tag version
     pushd $SRC &> /dev/null
     # VER=$(git tag -l|grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$'|sort -r -V|head -1||:)
-    VER=$(git describe --tags --abbrev=0)
+    VER=$(git describe --tags)
     popd &> /dev/null
   ;;
 esac

@@ -15,7 +15,7 @@ jobs:
     - name: Build with "most"
       run: bash build-release.sh -r
     - name: Print dir
-      run: ls -l build/windows/*-dev/ 
+      run: ls build/windows/*-dev/ 
     - name: Upload artfact
       uses: actions/upload-artifact@v2
       with:

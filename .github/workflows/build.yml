@@ -17,10 +17,10 @@ jobs:
     - name: Build with "most"
       run: bash build-release.sh -r
     - name: Print dir
-      run: ls build/windows/*-dev/ 
+      run: ls build/windows/*/ 
     - name: Upload artfact
       uses: actions/upload-artifact@v2
       with:
         name: release
-        path: build/windows/*-dev/usql-*-dev-windows-amd64.tar.bz2
+        path: build/windows/*/usql-*-dev-windows-amd64.tar.bz2
       

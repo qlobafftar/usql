@@ -25,6 +25,8 @@ case "$opt" in
 esac
 done
 
+echo "VER: $VER"
+
 # neither -v or -r specified, set FORCE and VER
 if [ "$VER" = "" ]; then
   VER=0.0.0-dev

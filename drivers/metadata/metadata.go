@@ -1,12 +1,8 @@
 package metadata
 
 import (
-	"errors"
-)
-
-var (
-	ErrNotSupported  = errors.New("error: not supported")
-	ErrScanArgsCount = errors.New("error: wrong number of arguments for Scan()")
+	"github.com/xo/dburl"
+	"github.com/xo/usql/text"
 )
 
 // ExtendedReader of all database metadata in a structured format.
@@ -15,8 +11,10 @@ type ExtendedReader interface {
 	SchemaReader
 	TableReader
 	ColumnReader
+	ColumnStatReader
 	IndexReader
 	IndexColumnReader
+	TriggerReader
 	ConstraintReader
 	ConstraintColumnReader
 	FunctionReader
@@ -55,6 +53,12 @@ type ColumnReader interface {
 	Columns(Filter) (*ColumnSet, error)
 }
 
+// ColumnStatsReader lists table column statistics.
+type ColumnStatReader interface {
+	Reader
+	ColumnStats(Filter) (*ColumnStatSet, error)
+}
+
 // IndexReader lists table indexes.
 type IndexReader interface {
 	Reader
@@ -65,6 +69,12 @@ type IndexReader interface {
 type IndexColumnReader interface {
 	Reader
 	IndexColumns(Filter) (*IndexColumnSet, error)
+}
+
+// TriggerReader lists table triggers.
+type TriggerReader interface {
+	Reader
+	Triggers(Filter) (*TriggerSet, error)
 }
 
 // ConstraintReader lists table constraints.
@@ -126,17 +136,19 @@ type Filter struct {
 // Writer of database metadata in a human readable format.
 type Writer interface {
 	// DescribeFunctions \df, \dfa, \dfn, \dft, \dfw, etc.
-	DescribeFunctions(string, string, bool, bool) error
+	DescribeFunctions(*dburl.URL, string, string, bool, bool) error
 	// DescribeTableDetails \d foo
-	DescribeTableDetails(string, bool, bool) error
+	DescribeTableDetails(*dburl.URL, string, bool, bool) error
 	// ListAllDbs \l
-	ListAllDbs(string, bool) error
+	ListAllDbs(*dburl.URL, string, bool) error
 	// ListTables \dt, \dv, \dm, etc.
-	ListTables(string, string, bool, bool) error
+	ListTables(*dburl.URL, string, string, bool, bool) error
 	// ListSchemas \dn
-	ListSchemas(string, bool, bool) error
+	ListSchemas(*dburl.URL, string, bool, bool) error
 	// ListIndexes \di
-	ListIndexes(string, bool, bool) error
+	ListIndexes(*dburl.URL, string, bool, bool) error
+	// ShowStats \ss
+	ShowStats(*dburl.URL, string, string, bool, int) error
 }
 
 type CatalogSet struct {
@@ -217,6 +229,7 @@ func NewTableSet(v []Table) *TableSet {
 				"Name",
 				"Type",
 
+				"Rows",
 				"Size",
 				"Comment",
 			},
@@ -233,6 +246,7 @@ type Table struct {
 	Schema  string
 	Name    string
 	Type    string
+	Rows    int64
 	Size    string
 	Comment string
 }
@@ -243,6 +257,7 @@ func (t Table) values() []interface{} {
 		t.Schema,
 		t.Name,
 		t.Type,
+		t.Rows,
 		t.Size,
 		t.Comment,
 	}
@@ -320,6 +335,73 @@ func (c Column) values() []interface{} {
 		c.DecimalDigits,
 		c.NumPrecRadix,
 		c.CharOctetLength,
+	}
+}
+
+type ColumnStatSet struct {
+	resultSet
+}
+
+func NewColumnStatSet(v []ColumnStat) *ColumnStatSet {
+	r := make([]Result, len(v))
+	for i := range v {
+		r[i] = &v[i]
+	}
+	return &ColumnStatSet{
+		resultSet: resultSet{
+			results: r,
+			columns: []string{
+				"Catalog",
+				"Schema",
+				"Table",
+				"Name",
+
+				"Average width",
+				"Nulls fraction",
+				"Distinct values",
+				"Minimum value",
+				"Maximum value",
+				"Mean value",
+				"Top N common values",
+				"Top N values freqs",
+			},
+		},
+	}
+}
+
+func (c ColumnStatSet) Get() *ColumnStat {
+	return c.results[c.current-1].(*ColumnStat)
+}
+
+type ColumnStat struct {
+	Catalog     string
+	Schema      string
+	Table       string
+	Name        string
+	AvgWidth    int
+	NullFrac    float64
+	NumDistinct int64
+	Min         string
+	Max         string
+	Mean        string
+	TopN        []string
+	TopNFreqs   []float64
+}
+
+func (c ColumnStat) values() []interface{} {
+	return []interface{}{
+		c.Catalog,
+		c.Schema,
+		c.Table,
+		c.Name,
+		c.AvgWidth,
+		c.NullFrac,
+		c.NumDistinct,
+		c.Min,
+		c.Max,
+		c.Mean,
+		c.TopN,
+		c.TopNFreqs,
 	}
 }
 
@@ -812,7 +894,7 @@ func (r resultSet) Scan(dest ...interface{}) error {
 		v = r.scanValues(r.results[r.current-1])
 	}
 	if len(v) != len(dest) {
-		return ErrScanArgsCount
+		return text.ErrWrongNumberOfArguments
 	}
 	for i, d := range dest {
 		p := d.(*interface{})
@@ -831,4 +913,49 @@ func (r resultSet) Err() error {
 
 func (r resultSet) NextResultSet() bool {
 	return false
+}
+
+type Trigger struct {
+	Catalog    string
+	Schema     string
+	Table      string
+	Name       string
+	Definition string
+}
+
+func (t Trigger) values() []interface{} {
+	return []interface{}{
+		t.Catalog,
+		t.Schema,
+		t.Table,
+		t.Name,
+		t.Definition,
+	}
+}
+
+type TriggerSet struct {
+	resultSet
+}
+
+func NewTriggerSet(t []Trigger) *TriggerSet {
+	r := make([]Result, len(t))
+	for i := range t {
+		r[i] = &t[i]
+	}
+	return &TriggerSet{
+		resultSet: resultSet{
+			results: r,
+			columns: []string{
+				"Catalog",
+				"Schema",
+				"Table",
+				"Name",
+				"Definition",
+			},
+		},
+	}
+}
+
+func (t TriggerSet) Get() *Trigger {
+	return t.results[t.current-1].(*Trigger)
 }

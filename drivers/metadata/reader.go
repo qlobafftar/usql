@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/xo/usql/text"
 )
 
 // PluginReader allows to be easily composed from other readers
@@ -12,8 +14,10 @@ type PluginReader struct {
 	schemas           func(Filter) (*SchemaSet, error)
 	tables            func(Filter) (*TableSet, error)
 	columns           func(Filter) (*ColumnSet, error)
+	columnStats       func(Filter) (*ColumnStatSet, error)
 	indexes           func(Filter) (*IndexSet, error)
 	indexColumns      func(Filter) (*IndexColumnSet, error)
+	triggers          func(Filter) (*TriggerSet, error)
 	constraints       func(Filter) (*ConstraintSet, error)
 	constraintColumns func(Filter) (*ConstraintColumnSet, error)
 	functions         func(Filter) (*FunctionSet, error)
@@ -39,11 +43,17 @@ func NewPluginReader(readers ...Reader) Reader {
 		if r, ok := i.(ColumnReader); ok {
 			p.columns = r.Columns
 		}
+		if r, ok := i.(ColumnStatReader); ok {
+			p.columnStats = r.ColumnStats
+		}
 		if r, ok := i.(IndexReader); ok {
 			p.indexes = r.Indexes
 		}
 		if r, ok := i.(IndexColumnReader); ok {
 			p.indexColumns = r.IndexColumns
+		}
+		if r, ok := i.(TriggerReader); ok {
+			p.triggers = r.Triggers
 		}
 		if r, ok := i.(ConstraintReader); ok {
 			p.constraints = r.Constraints
@@ -66,77 +76,91 @@ func NewPluginReader(readers ...Reader) Reader {
 
 func (p PluginReader) Catalogs(f Filter) (*CatalogSet, error) {
 	if p.catalogs == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.catalogs(f)
 }
 
 func (p PluginReader) Schemas(f Filter) (*SchemaSet, error) {
 	if p.schemas == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.schemas(f)
 }
 
 func (p PluginReader) Tables(f Filter) (*TableSet, error) {
 	if p.tables == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.tables(f)
 }
 
 func (p PluginReader) Columns(f Filter) (*ColumnSet, error) {
 	if p.columns == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.columns(f)
 }
 
+func (p PluginReader) ColumnStats(f Filter) (*ColumnStatSet, error) {
+	if p.columnStats == nil {
+		return nil, text.ErrNotSupported
+	}
+	return p.columnStats(f)
+}
+
 func (p PluginReader) Indexes(f Filter) (*IndexSet, error) {
 	if p.indexes == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.indexes(f)
 }
 
 func (p PluginReader) IndexColumns(f Filter) (*IndexColumnSet, error) {
 	if p.indexColumns == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.indexColumns(f)
 }
 
+func (p PluginReader) Triggers(f Filter) (*TriggerSet, error) {
+	if p.triggers == nil {
+		return nil, text.ErrNotSupported
+	}
+	return p.triggers(f)
+}
+
 func (p PluginReader) Constraints(f Filter) (*ConstraintSet, error) {
 	if p.constraints == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.constraints(f)
 }
 
 func (p PluginReader) ConstraintColumns(f Filter) (*ConstraintColumnSet, error) {
 	if p.constraintColumns == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.constraintColumns(f)
 }
 
 func (p PluginReader) Functions(f Filter) (*FunctionSet, error) {
 	if p.functions == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.functions(f)
 }
 
 func (p PluginReader) FunctionColumns(f Filter) (*FunctionColumnSet, error) {
 	if p.functionColumns == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.functionColumns(f)
 }
 
 func (p PluginReader) Sequences(f Filter) (*SequenceSet, error) {
 	if p.sequences == nil {
-		return nil, ErrNotSupported
+		return nil, text.ErrNotSupported
 	}
 	return p.sequences(f)
 }

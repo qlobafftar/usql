@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/xo/dburl"
 	"github.com/xo/tblfmt"
 	"github.com/xo/usql/env"
 	"github.com/xo/usql/text"
@@ -37,8 +38,6 @@ type DefaultWriter struct {
 	// custom functions for easier overloading
 	listAllDbs func(string, bool) error
 }
-
-var _ Writer = &DefaultWriter{}
 
 func NewDefaultWriter(r Reader, opts ...WriterOption) func(db DB, w io.Writer) Writer {
 	defaultWriter := &DefaultWriter{
@@ -91,10 +90,10 @@ func WithListAllDbs(f func(string, bool) error) WriterOption {
 }
 
 // DescribeFunctions matching pattern
-func (w DefaultWriter) DescribeFunctions(funcTypes, pattern string, verbose, showSystem bool) error {
+func (w DefaultWriter) DescribeFunctions(u *dburl.URL, funcTypes, pattern string, verbose, showSystem bool) error {
 	r, ok := w.r.(FunctionReader)
 	if !ok {
-		return fmt.Errorf(text.NotSupportedByDriver, `\df`)
+		return fmt.Errorf(text.NotSupportedByDriver, `\df`, u.Driver)
 	}
 	types := []string{}
 	for k, v := range w.funcTypes {
@@ -176,7 +175,7 @@ func (w DefaultWriter) getFunctionColumns(c, s, f string) (string, error) {
 }
 
 // DescribeTableDetails matching pattern
-func (w DefaultWriter) DescribeTableDetails(pattern string, verbose, showSystem bool) error {
+func (w DefaultWriter) DescribeTableDetails(u *dburl.URL, pattern string, verbose, showSystem bool) error {
 	sp, tp, err := parsePattern(pattern)
 	if err != nil {
 		return fmt.Errorf("failed to parse search pattern: %w", err)
@@ -221,7 +220,7 @@ func (w DefaultWriter) DescribeTableDetails(pattern string, verbose, showSystem 
 	_, isICR := w.r.(IndexColumnReader)
 	if isIR && isICR {
 		res, err := ir.Indexes(Filter{Schema: sp, Name: tp, WithSystem: showSystem})
-		if err != nil && err != ErrNotSupported {
+		if err != nil && err != text.ErrNotSupported {
 			return fmt.Errorf("failed to list indexes for table %s: %w", tp, err)
 		}
 		if res != nil {
@@ -359,8 +358,37 @@ func (w DefaultWriter) tableDetailsSummary(sp, tp string) func(io.Writer, int) (
 				return err
 			},
 		)
+		err = w.describeTableTriggers(out, sp, tp)
+		if err != nil {
+			return 0, err
+		}
 		return 0, err
 	}
+}
+
+func (w DefaultWriter) describeTableTriggers(out io.Writer, sp, tp string) error {
+	r, ok := w.r.(TriggerReader)
+	if !ok {
+		return nil
+	}
+	res, err := r.Triggers(Filter{Schema: sp, Parent: tp})
+	if err != nil && err != text.ErrNotSupported {
+		return fmt.Errorf("failed to list triggers for table %s: %w", tp, err)
+	}
+	if res == nil {
+		return nil
+	}
+	defer res.Close()
+
+	if res.Len() == 0 {
+		return nil
+	}
+	fmt.Fprintln(out, "Triggers:")
+	for res.Next() {
+		t := res.Get()
+		fmt.Fprintf(out, "  \"%s\" %s\n", t.Name, t.Definition)
+	}
+	return nil
 }
 
 func (w DefaultWriter) describeTableIndexes(out io.Writer, sp, tp string) error {
@@ -369,7 +397,7 @@ func (w DefaultWriter) describeTableIndexes(out io.Writer, sp, tp string) error 
 		return nil
 	}
 	res, err := r.Indexes(Filter{Schema: sp, Parent: tp})
-	if err != nil && err != ErrNotSupported {
+	if err != nil && err != text.ErrNotSupported {
 		return fmt.Errorf("failed to list indexes for table %s: %w", tp, err)
 	}
 	if res == nil {
@@ -419,7 +447,7 @@ func (w DefaultWriter) describeTableConstraints(out io.Writer, filter Filter, po
 		return nil
 	}
 	res, err := r.Constraints(filter)
-	if err != nil && err != ErrNotSupported {
+	if err != nil && err != text.ErrNotSupported {
 		return fmt.Errorf("failed to list constraints: %w", err)
 	}
 	if res == nil {
@@ -460,7 +488,7 @@ func (w DefaultWriter) getConstraintColumns(c, s, t, n string) (string, string, 
 func (w DefaultWriter) describeSequences(sp, tp string, verbose, showSystem bool) (int, error) {
 	r := w.r.(SequenceReader)
 	res, err := r.Sequences(Filter{Schema: sp, Name: tp, WithSystem: showSystem})
-	if err != nil && err != ErrNotSupported {
+	if err != nil && err != text.ErrNotSupported {
 		return 0, err
 	}
 	if res == nil {
@@ -517,13 +545,13 @@ func (w DefaultWriter) describeIndex(i *Index) error {
 }
 
 // ListAllDbs matching pattern
-func (w DefaultWriter) ListAllDbs(pattern string, verbose bool) error {
+func (w DefaultWriter) ListAllDbs(u *dburl.URL, pattern string, verbose bool) error {
 	if w.listAllDbs != nil {
 		return w.listAllDbs(pattern, verbose)
 	}
 	r, ok := w.r.(CatalogReader)
 	if !ok {
-		return fmt.Errorf(text.NotSupportedByDriver, `\l`)
+		return fmt.Errorf(text.NotSupportedByDriver, `\l`, u.Driver)
 	}
 	res, err := r.Catalogs(Filter{Name: pattern})
 	if err != nil {
@@ -537,10 +565,10 @@ func (w DefaultWriter) ListAllDbs(pattern string, verbose bool) error {
 }
 
 // ListTables matching pattern
-func (w DefaultWriter) ListTables(tableTypes, pattern string, verbose, showSystem bool) error {
+func (w DefaultWriter) ListTables(u *dburl.URL, tableTypes, pattern string, verbose, showSystem bool) error {
 	r, ok := w.r.(TableReader)
 	if !ok {
-		return fmt.Errorf(text.NotSupportedByDriver, `\dt`)
+		return fmt.Errorf(text.NotSupportedByDriver, `\dt`, u.Driver)
 	}
 	types := []string{}
 	for k, v := range w.tableTypes {
@@ -571,14 +599,14 @@ func (w DefaultWriter) ListTables(tableTypes, pattern string, verbose, showSyste
 	}
 	columns := []string{"Schema", "Name", "Type"}
 	if verbose {
-		columns = append(columns, "Size", "Comment")
+		columns = append(columns, "Rows", "Size", "Comment")
 	}
 	res.SetColumns(columns)
 	res.SetScanValues(func(r Result) []interface{} {
 		f := r.(*Table)
 		v := []interface{}{f.Schema, f.Name, f.Type}
 		if verbose {
-			v = append(v, f.Size, f.Comment)
+			v = append(v, f.Rows, f.Size, f.Comment)
 		}
 		return v
 	})
@@ -589,10 +617,10 @@ func (w DefaultWriter) ListTables(tableTypes, pattern string, verbose, showSyste
 }
 
 // ListSchemas matching pattern
-func (w DefaultWriter) ListSchemas(pattern string, verbose, showSystem bool) error {
+func (w DefaultWriter) ListSchemas(u *dburl.URL, pattern string, verbose, showSystem bool) error {
 	r, ok := w.r.(SchemaReader)
 	if !ok {
-		return fmt.Errorf(text.NotSupportedByDriver, `\d`)
+		return fmt.Errorf(text.NotSupportedByDriver, `\d`, u.Driver)
 	}
 	res, err := r.Schemas(Filter{Name: pattern, WithSystem: showSystem})
 	if err != nil {
@@ -613,10 +641,10 @@ func (w DefaultWriter) ListSchemas(pattern string, verbose, showSystem bool) err
 }
 
 // ListIndexes matching pattern
-func (w DefaultWriter) ListIndexes(pattern string, verbose, showSystem bool) error {
+func (w DefaultWriter) ListIndexes(u *dburl.URL, pattern string, verbose, showSystem bool) error {
 	r, ok := w.r.(IndexReader)
 	if !ok {
-		return fmt.Errorf(text.NotSupportedByDriver, `\di`)
+		return fmt.Errorf(text.NotSupportedByDriver, `\di`, u.Driver)
 	}
 	sp, tp, err := parsePattern(pattern)
 	if err != nil {
@@ -657,6 +685,90 @@ func (w DefaultWriter) ListIndexes(pattern string, verbose, showSystem bool) err
 
 	params := env.Pall()
 	params["title"] = "List of indexes"
+	return tblfmt.EncodeAll(w.w, res, params)
+}
+
+// ShowStats of columns for tables matching pattern
+func (w DefaultWriter) ShowStats(u *dburl.URL, statTypes, pattern string, verbose bool, k int) error {
+	r, ok := w.r.(ColumnStatReader)
+	if !ok {
+		return fmt.Errorf(text.NotSupportedByDriver, `\ss`, u.Driver)
+	}
+	sp, tp, err := parsePattern(pattern)
+	if err != nil {
+		return fmt.Errorf("failed to parse search pattern: %w", err)
+	}
+
+	rows := int64(0)
+	tr, ok := w.r.(TableReader)
+	if ok {
+		tables, err := tr.Tables(Filter{Schema: sp, Name: tp})
+		if err != nil {
+			return fmt.Errorf("failed to get table entry: %w", err)
+		}
+		defer tables.Close()
+		if tables.Next() {
+			rows = tables.Get().Rows
+		}
+	}
+
+	types := []string{"basic"}
+	if verbose {
+		types = append(types, "extended")
+	}
+	res, err := r.ColumnStats(Filter{Schema: sp, Parent: tp, Types: types})
+	if err != nil {
+		return fmt.Errorf("failed to get column stats: %w", err)
+	}
+	defer res.Close()
+
+	if res.Len() == 0 {
+		fmt.Fprintf(w.w, text.RelationNotFound, pattern)
+		fmt.Fprintln(w.w)
+		return nil
+	}
+	columns := []string{"Schema", "Table", "Name", "Average width", "Nulls fraction", "Distinct values", "Dist. fraction"}
+	if verbose {
+		columns = append(columns, "Minimum value", "Maximum value", "Mean value", "Top N common values", "Top N values freqs")
+	}
+	res.SetColumns(columns)
+	res.SetScanValues(func(r Result) []interface{} {
+		f := r.(*ColumnStat)
+		freqs := []string{}
+		for _, freq := range f.TopNFreqs {
+			freqs = append(freqs, fmt.Sprintf("%.4f", freq))
+		}
+		n := k
+		if n > len(freqs) {
+			n = len(freqs)
+		}
+		distFrac := 1.0
+		if rows != 0 && f.NumDistinct != rows {
+			distFrac = float64(f.NumDistinct) / float64(rows)
+		}
+		v := []interface{}{
+			f.Schema,
+			f.Table,
+			f.Name,
+			f.AvgWidth,
+			f.NullFrac,
+			f.NumDistinct,
+			fmt.Sprintf("%.4f", distFrac),
+		}
+		if verbose {
+			v = append(v,
+				f.Min,
+				f.Max,
+				f.Mean,
+				strings.Join(f.TopN[:n], ", "),
+				strings.Join(freqs[:n], ", "),
+			)
+		}
+		return v
+	})
+
+	params := env.Pall()
+	params["title"] = "Column stats"
 	return tblfmt.EncodeAll(w.w, res, params)
 }
 

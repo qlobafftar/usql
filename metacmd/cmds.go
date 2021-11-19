@@ -267,6 +267,8 @@ func init() {
 				if err != nil {
 					return err
 				}
+				// save edited buffer to history
+				p.Handler.IO().Save(string(n))
 				buf.Reset(n)
 				return nil
 			},
@@ -750,21 +752,59 @@ func init() {
 				switch name {
 				case "d":
 					if pattern != "" {
-						return m.DescribeTableDetails(pattern, verbose, showSystem)
+						return m.DescribeTableDetails(p.Handler.URL(), pattern, verbose, showSystem)
 					}
-					return m.ListTables("tvmsE", pattern, verbose, showSystem)
+					return m.ListTables(p.Handler.URL(), "tvmsE", pattern, verbose, showSystem)
 				case "df", "da":
-					return m.DescribeFunctions(name, pattern, verbose, showSystem)
+					return m.DescribeFunctions(p.Handler.URL(), name, pattern, verbose, showSystem)
 				case "dt", "dtv", "dtm", "dts", "dv", "dm", "ds":
-					return m.ListTables(name, pattern, verbose, showSystem)
+					return m.ListTables(p.Handler.URL(), name, pattern, verbose, showSystem)
 				case "dn":
-					return m.ListSchemas(pattern, verbose, showSystem)
+					return m.ListSchemas(p.Handler.URL(), pattern, verbose, showSystem)
 				case "di":
-					return m.ListIndexes(pattern, verbose, showSystem)
+					return m.ListIndexes(p.Handler.URL(), pattern, verbose, showSystem)
 				case "l":
-					return m.ListAllDbs(pattern, verbose)
+					return m.ListAllDbs(p.Handler.URL(), pattern, verbose)
 				}
 				return nil
+			},
+		},
+		Stats: {
+			Section: SectionInformational,
+			Name:    "ss[+]",
+			Desc:    "show stats for a table or a query,[TABLE|QUERY] [k]",
+			Process: func(p *Params) error {
+				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+				defer cancel()
+				m, err := p.Handler.MetadataWriter(ctx)
+				if err != nil {
+					return err
+				}
+				verbose := strings.ContainsRune(p.Name, '+')
+				name := strings.TrimRight(p.Name, "+")
+				pattern, err := p.Get(true)
+				if err != nil {
+					return err
+				}
+				k := 0
+				if verbose {
+					k = 3
+				}
+				if name == "ss" {
+					name = "sswnulhmkf"
+				}
+				ok, val, err := p.GetOK(true)
+				if err != nil {
+					return err
+				}
+				if ok {
+					verbose = true
+					k, err = strconv.Atoi(val)
+					if err != nil {
+						return err
+					}
+				}
+				return m.ShowStats(p.Handler.URL(), name, pattern, verbose, k)
 			},
 		},
 		Copy: {

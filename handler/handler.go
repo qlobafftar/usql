@@ -583,7 +583,7 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 }
 
 func (h *Handler) connStrings() []string {
-	entries, err := passfile.Entries(h.user, text.PassfileName)
+	entries, err := passfile.Entries(h.user.HomeDir, text.PassfileName)
 	if err != nil {
 		// ignore the error as this is only used for completer
 		// and it'll be reported again when trying to force params before opening a conn
@@ -627,7 +627,7 @@ func (h *Handler) forceParams(u *dburl.URL) {
 	// force driver parameters
 	drivers.ForceParams(u)
 	// see if password entry is present
-	user, err := passfile.Match(h.user, u, text.PassfileName)
+	user, err := passfile.Match(u, h.user.HomeDir, text.PassfileName)
 	switch {
 	case err != nil:
 		fmt.Fprintln(h.l.Stderr(), "error:", err)
@@ -928,6 +928,9 @@ func (h *Handler) query(ctx context.Context, w io.Writer, opt metacmd.Option, ty
 		}
 		useColumnTypes = false
 	}
+	if drivers.LowerColumnNames(h.u) {
+		params["lower_column_names"] = "true"
+	}
 	if useColumnTypes {
 		params["use_column_types"] = "true"
 	}
@@ -1127,23 +1130,43 @@ func (h *Handler) Include(path string, relative bool) error {
 	if relative && !filepath.IsAbs(path) {
 		path = filepath.Join(h.wd, path)
 	}
-	// read file
+	// open
 	path, f, err := env.OpenFile(h.user, path, relative)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	s := bufio.NewScanner(f)
+	r := bufio.NewReader(f)
+	// setup rline
 	l := &rline.Rline{
 		N: func() ([]rune, error) {
-			if !s.Scan() {
-				err := s.Err()
-				if err == nil {
-					return nil, io.EOF
+			buf := new(bytes.Buffer)
+			var b []byte
+			var isPrefix bool
+			var err error
+			for {
+				// read
+				b, isPrefix, err = r.ReadLine()
+				// when not EOF
+				if err != nil && err != io.EOF {
+					return nil, err
 				}
-				return nil, err
+				// append
+				if _, werr := buf.Write(b); werr != nil {
+					return nil, werr
+				}
+				// end of line
+				if !isPrefix || err != nil {
+					break
+				}
 			}
-			return []rune(s.Text()), nil
+			// peek and read possible line ending \n or \r\n
+			if err != io.EOF {
+				if err := peekEnding(buf, r); err != nil {
+					return nil, err
+				}
+			}
+			return []rune(buf.String()), err
 		},
 		Out: h.l.Stdout(),
 		Err: h.l.Stderr(),
@@ -1196,4 +1219,37 @@ func (h *Handler) SetOutput(o io.WriteCloser) {
 		h.out.Close()
 	}
 	h.out = o
+}
+
+// peekEnding peeks to see if the next successive bytes in r is \n or \r\n,
+// writing to w if it is. Does not advance r if the next bytes are not \n or
+// \r\n.
+func peekEnding(w io.Writer, r *bufio.Reader) error {
+	// peek first byte
+	buf, err := r.Peek(1)
+	switch {
+	case err != nil && err != io.EOF:
+		return err
+	case err == nil && buf[0] == '\n':
+		if _, rerr := r.ReadByte(); err != nil && err != io.EOF {
+			return rerr
+		}
+		_, werr := w.Write([]byte{'\n'})
+		return werr
+	case err == nil && buf[0] != '\r':
+		return nil
+	}
+	// peek second byte
+	buf, err = r.Peek(1)
+	switch {
+	case err != nil && err != io.EOF:
+		return err
+	case err == nil && buf[0] != '\n':
+		return nil
+	}
+	if _, rerr := r.ReadByte(); err != nil && err != io.EOF {
+		return rerr
+	}
+	_, werr := w.Write([]byte{'\n'})
+	return werr
 }

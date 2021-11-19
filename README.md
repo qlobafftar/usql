@@ -119,19 +119,9 @@ scoop install usql
 `usql` can be installed in the usual Go fashion:
 
 ```sh
-# install usql with basic database support
+# install usql from master branch with basic database support
 # includes PostgreSQL, Oracle Database, MySQL, MS SQL, and SQLite3 drivers
-$ GO111MODULE=on go get github.com/xo/usql
-```
-
-Support for additional databases can be specified with [build tags][Database Support]:
-
-```sh
-# install usql with most drivers (excludes unsupported drivers)
-$ GO111MODULE=on go get -tags most github.com/xo/usql
-
-# install usql with all drivers
-$ GO111MODULE=on go get -tags all github.com/xo/usql
+$ go install github.com/xo/usql@master
 ```
 
 ## Building
@@ -144,13 +134,13 @@ drivers, respectively:
 
 ```sh
 # install all drivers
-$ GO111MODULE=on go get -tags all github.com/xo/usql
+$ go install -tags all github.com/xo/usql@master
 
-# install with most drivers
-$ GO111MODULE=on go get -tags most github.com/xo/usql
+# install with most drivers (excludes unsupported drivers)
+$ go install -tags most github.com/xo/usql@master
 
 # install with base drivers and additional support for Oracle Database and ODBC
-$ GO111MODULE=on go get -tags 'godror odbc' github.com/xo/usql
+$ go install -tags 'godror odbc' github.com/xo/usql@master
 ```
 
 For every build tag `<driver>`, there is also a `no_<driver>` build tag
@@ -158,7 +148,7 @@ disabling the driver:
 
 ```sh
 # install all drivers excluding avatica and couchbase
-$ GO111MODULE=on go get -tags 'all no_avatica no_couchbase' github.com/xo/usql
+$ go install -tags 'all no_avatica no_couchbase' github.com/xo/usql@master
 ```
 
 ### Release Builds
@@ -218,24 +208,25 @@ associated database, scheme / build tag, and scheme aliases:
 |----------------------|-----------------|-------------------------------------------------|-----------------------------------------------------------------|
 | Microsoft SQL Server | `sqlserver`     | `ms`, `mssql`                                   | [github.com/denisenkom/go-mssqldb][d-sqlserver]                 |
 | MySQL                | `mysql`         | `my`, `maria`, `aurora`, `mariadb`, `percona`   | [github.com/go-sql-driver/mysql][d-mysql]                       |
-| Oracle Database      | `oracle`        | `or`, `ora`, `oci`, `oci8`, `odpi`, `odpi-c`    | [github.com/sijms/go-ora][d-oracle]                             |
+| Oracle Database      | `oracle`        | `or`, `ora`, `oci`, `oci8`, `odpi`, `odpi-c`    | [github.com/sijms/go-ora/v2][d-oracle]                          |
 | PostgreSQL           | `postgres`      | `pg`, `pgsql`, `postgresql`                     | [github.com/lib/pq][d-postgres]                                 |
 | SQLite3              | `sqlite3`       | `sq`, `file`, `sqlite`                          | [github.com/mattn/go-sqlite3][d-sqlite3]<sup>[†][f-cgo]</sup>   |
 |                      |                 |                                                 |                                                                 |
-| AWS Athena           | `athena`        | `s3`, `aws`                                     | [github.com/uber/athenadriver/go][d-athena]                     |
 | Alibaba MaxCompute   | `maxcompute`    | `mc`                                            | [sqlflow.org/gomaxcompute][d-maxcompute]                        |
 | Apache Avatica       | `avatica`       | `av`, `phoenix`                                 | [github.com/apache/calcite-avatica-go/v5][d-avatica]            |
 | Apache H2            | `h2`            |                                                 | [github.com/jmrobles/h2go][d-h2]                                |
 | Apache Ignite        | `ignite`        | `ig`, `gridgain`                                | [github.com/amsokol/ignite-go-client/sql][d-ignite]             |
-| CSVQ                 | `csvq`          | `cs`, `csv`, `tsv`, `json`                      | [github.com/mithrandie/csvq-driver][d-csvq]                     |
+| AWS Athena           | `athena`        | `s3`, `aws`                                     | [github.com/uber/athenadriver/go][d-athena]                     |
 | Cassandra            | `cassandra`     | `ca`, `scy`, `scylla`, `datastax`, `cql`        | [github.com/MichaelS11/go-cql-driver][d-cassandra]              |
 | ClickHouse           | `clickhouse`    | `ch`                                            | [github.com/ClickHouse/clickhouse-go][d-clickhouse]             |
 | Couchbase            | `couchbase`     | `n1`, `n1ql`                                    | [github.com/couchbase/go_n1ql][d-couchbase]                     |
+| CSVQ                 | `csvq`          | `cs`, `csv`, `tsv`, `json`                      | [github.com/mithrandie/csvq-driver][d-csvq]                     |
 | Cznic QL             | `ql`            | `cznic`, `cznicql`                              | [modernc.org/ql][d-ql]                                          |
+| Exasol               | `exasol`        | `ex`, `exa`                                     | [github.com/exasol/exasol-driver-go][d-exasol]                  |
 | Firebird             | `firebird`      | `fb`, `firebirdsql`                             | [github.com/nakagami/firebirdsql][d-firebird]                   |
-| Genji                | `genji`         | `gj`                                            | [github.com/genjidb/genji/sql/driver][d-genji]                  |
+| Genji                | `genji`         | `gj`                                            | [github.com/genjidb/genji/driver][d-genji]                      |
 | Google BigQuery      | `bigquery`      | `bq`                                            | [gorm.io/driver/bigquery/driver][d-bigquery]                    |
-| Google Spanner       | `spanner`       | `sp`                                            | [github.com/rakyll/go-sql-driver-spanner][d-spanner]            |
+| Google Spanner       | `spanner`       | `sp`                                            | [github.com/cloudspannerecosystem/go-sql-spanner][d-spanner]    |
 | Microsoft ADODB      | `adodb`         | `ad`, `ado`                                     | [github.com/mattn/go-adodb][d-adodb]                            |
 | ModernC SQLite3      | `moderncsqlite` | `mq`, `modernsqlite`                            | [modernc.org/sqlite][d-moderncsqlite]                           |
 | MySQL MyMySQL        | `mymysql`       | `zm`, `mymy`                                    | [github.com/ziutek/mymysql/godrv][d-mymysql]                    |
@@ -276,6 +267,7 @@ associated database, scheme / build tag, and scheme aliases:
 [d-cosmos]: https://github.com/btnguyen2k/gocosmos
 [d-couchbase]: https://github.com/couchbase/go_n1ql
 [d-csvq]: https://github.com/mithrandie/csvq-driver
+[d-exasol]: https://github.com/exasol/exasol-driver-go
 [d-firebird]: https://github.com/nakagami/firebirdsql
 [d-genji]: https://github.com/genjidb/genji
 [d-godror]: https://github.com/godror/godror
@@ -297,7 +289,7 @@ associated database, scheme / build tag, and scheme aliases:
 [d-sapase]: https://github.com/thda/tds
 [d-saphana]: https://github.com/SAP/go-hdb
 [d-snowflake]: https://github.com/snowflakedb/gosnowflake
-[d-spanner]: https://github.com/rakyll/go-sql-driver-spanner
+[d-spanner]: https://github.com/cloudspannerecosystem/go-sql-spanner
 [d-sqlite3]: https://github.com/mattn/go-sqlite3
 [d-sqlserver]: https://github.com/denisenkom/go-mssqldb
 [d-trino]: https://github.com/trinodb/trino-go-client
@@ -422,9 +414,9 @@ Where the above are:
   <i>
     <a id="f-path">
       <sup>±</sup>Some databases, such as Microsoft SQL Server, or Oracle
-      Database support a path component (ie, `/dbname`) in the form of
-      `/instance/dbname`, where `/instance` is the optional service identifier
-      (aka "SID") or database instance
+      Database support a path component (ie, <code>/dbname</code>) in the form
+      of <code>/instance/dbname</code>, where <code>/instance</code> is the
+      optional service identifier (aka "SID") or database instance
     </a>
   </i>
 </p>
@@ -651,6 +643,7 @@ Informational
   \dt[S+] [PATTERN]                    list tables
   \dv[S+] [PATTERN]                    list views
   \l[+]                                list databases
+  \ss[+] [TABLE|QUERY] [k]             show stats for a table or a query
 
 Formatting
   \pset [NAME [VALUE]]                 set table output option

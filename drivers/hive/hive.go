@@ -1,7 +1,7 @@
 // Package hive defines and registers usql's Apache Hive driver.
 //
+// Group: bad
 // See: https://github.com/sql-machine-learning/gohive
-// Group: all
 package hive
 
 import (

@@ -34,7 +34,7 @@ func NewReader() func(drivers.DB, ...metadata.ReaderOption) metadata.Reader {
 			}),
 			infos.WithSystemSchemas([]string{"pg_catalog", "pg_toast", "information_schema"}),
 			infos.WithCurrentSchema("CURRENT_SCHEMA"),
-		)
+			infos.WithDataTypeFormatter(dataTypeFormatter))
 		return metadata.NewPluginReader(
 			newIS(db, opts...),
 			&metaReader{
@@ -44,13 +44,67 @@ func NewReader() func(drivers.DB, ...metadata.ReaderOption) metadata.Reader {
 	}
 }
 
+func dataTypeFormatter(col metadata.Column) string {
+	switch col.DataType {
+	case "bit", "character":
+		return fmt.Sprintf("%s(%d)", col.DataType, col.ColumnSize)
+	case "bit varying", "character varying":
+		if col.ColumnSize != 0 {
+			return fmt.Sprintf("%s(%d)", col.DataType, col.ColumnSize)
+		} else {
+			return col.DataType
+		}
+	case "numeric":
+		if col.ColumnSize != 0 {
+			return fmt.Sprintf("numeric(%d,%d)", col.ColumnSize, col.DecimalDigits)
+		} else {
+			return col.DataType
+		}
+	case "time without time zone":
+		return fmt.Sprintf("time(%d) without time zone", col.ColumnSize)
+	case "time with time zone":
+		return fmt.Sprintf("time(%d) with time zone", col.ColumnSize)
+	case "timestamp without time zone":
+		return fmt.Sprintf("timestamp(%d) without time zone", col.ColumnSize)
+	case "timestamp with time zone":
+		return fmt.Sprintf("timestamp(%d) with time zone", col.ColumnSize)
+	default:
+		return col.DataType
+	}
+}
+
 func (r *metaReader) SetLimit(l int) {
 	r.limit = l
 }
 
+type Catalog struct {
+	metadata.Catalog
+	Owner            string
+	Encoding         string
+	Collate          string
+	Ctype            string
+	AccessPrivileges string
+}
+
+func (s Catalog) Values() []interface{} {
+	return []interface{}{s.Catalog.Catalog, s.Owner, s.Encoding, s.Collate, s.Ctype, s.AccessPrivileges}
+}
+
+func (s Catalog) GetCatalog() metadata.Catalog {
+	return s.Catalog
+}
+
+var (
+	catalogsColumnName = []string{"Catalog", "Owner", "Encoding", "Collate", "Ctype", "Access privileges"}
+)
+
 func (r metaReader) Catalogs(metadata.Filter) (*metadata.CatalogSet, error) {
-	qstr := `
-SELECT d.datname as "Name"
+	qstr := `SELECT d.datname as "Name",
+       pg_catalog.pg_get_userbyid(d.datdba) as "Owner",
+       pg_catalog.pg_encoding_to_char(d.encoding) as "Encoding",
+       d.datcollate as "Collate",
+       d.datctype as "Ctype",
+       COALESCE(pg_catalog.array_to_string(d.datacl, E'\n'),'') AS "Access privileges"
 FROM pg_catalog.pg_database d`
 	rows, closeRows, err := r.query(qstr, []string{}, "1")
 	if err != nil {
@@ -58,32 +112,34 @@ FROM pg_catalog.pg_database d`
 	}
 	defer closeRows()
 
-	results := []metadata.Catalog{}
+	var results []metadata.Result
 	for rows.Next() {
-		rec := metadata.Catalog{}
-		err = rows.Scan(&rec.Catalog)
+		rec := Catalog{
+			Catalog: metadata.Catalog{},
+		}
+		err = rows.Scan(&rec.Catalog.Catalog, &rec.Owner, &rec.Encoding, &rec.Collate, &rec.Ctype, &rec.AccessPrivileges)
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, rec)
+		results = append(results, &rec)
 	}
 	if rows.Err() != nil {
 		return nil, rows.Err()
 	}
-	return metadata.NewCatalogSet(results), nil
+	return metadata.NewCatalogSetWithColumns(results, catalogsColumnName), nil
 }
 
 func (r metaReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
 	qstr := `SELECT n.nspname as "Schema",
   c.relname as "Name",
-  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 's' THEN 'special' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 's' THEN 'special' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' ELSE 'unknown' END as "Type",
   COALESCE((c.reltuples / NULLIF(c.relpages, 0)) * (pg_catalog.pg_relation_size(c.oid) / current_setting('block_size')::int), 0)::bigint as "Rows",
   pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as "Size",
   COALESCE(pg_catalog.obj_description(c.oid, 'pg_class'), '') as "Description"
 FROM pg_catalog.pg_class c
      LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 `
-	conds := []string{"n.nspname !~ '^pg_toast'"}
+	conds := []string{"n.nspname !~ '^pg_toast' AND c.relkind != 'c'"}
 	vals := []interface{}{}
 	if f.OnlyVisible {
 		conds = append(conds, "pg_catalog.pg_table_is_visible(c.oid)")
@@ -115,7 +171,7 @@ FROM pg_catalog.pg_class c
 		}
 		conds = append(conds, fmt.Sprintf("c.relkind IN (%s)", strings.Join(pholders, ", ")))
 	}
-	rows, closeRows, err := r.query(qstr, conds, "1, 2", vals...)
+	rows, closeRows, err := r.query(qstr, conds, "1, 3, 2", vals...)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return metadata.NewTableSet([]metadata.Table{}), nil
@@ -156,7 +212,7 @@ SELECT
   s.attname,
   s.avg_width,
   s.null_frac,
-  CASE WHEN n_distinct >= 0 THEN n_distinct ELSE (-n_distinct * $1)::bigint END,
+  CASE WHEN n_distinct >= 0 THEN n_distinct ELSE (-n_distinct * $1) END::bigint AS n_distinct,
   COALESCE((histogram_bounds::text::text[])[1], ''),
   COALESCE((histogram_bounds::text::text[])[array_length(histogram_bounds::text::text[], 1)], ''),
   most_common_vals::text::text[],
@@ -248,7 +304,7 @@ FROM pg_catalog.pg_class c
 		vals = append(vals, f.Name)
 		conds = append(conds, fmt.Sprintf("c.relname LIKE $%d", len(vals)))
 	}
-	rows, closeRows, err := r.query(qstr, conds, "1, 2", vals...)
+	rows, closeRows, err := r.query(qstr, conds, "1, 2, 4", vals...)
 	if err != nil {
 		return nil, err
 	}

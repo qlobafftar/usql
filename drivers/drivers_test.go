@@ -9,10 +9,11 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,15 +120,30 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	var only string
 	flag.BoolVar(&cleanup, "cleanup", true, "delete containers when finished")
+	flag.StringVar(&only, "dbs", "", "comma separated list of dbs to test: pgsql, mysql, sqlserver, trino")
 	flag.Parse()
+
+	if only != "" {
+		runOnly := map[string]struct{}{}
+		for _, dbName := range strings.Split(only, ",") {
+			dbName = strings.TrimSpace(dbName)
+			runOnly[dbName] = struct{}{}
+		}
+		for dbName := range dbs {
+			if _, ok := runOnly[dbName]; !ok {
+				delete(dbs, dbName)
+			}
+		}
+	}
 
 	pool, err := dt.NewPool("")
 	if err != nil {
 		log.Fatalf("Could not connect to docker: %s", err)
 	}
 
-	for _, db := range dbs {
+	for dbName, db := range dbs {
 		var ok bool
 		db.Resource, ok = pool.ContainerByName(db.RunOptions.Name)
 		if !ok {
@@ -137,14 +153,14 @@ func TestMain(m *testing.M) {
 			}
 			db.Resource, err = pool.BuildAndRunWithBuildOptions(buildOpts, db.RunOptions)
 			if err != nil {
-				log.Fatal("Could not start resource: ", err)
+				log.Fatalf("Could not start %s: %s", dbName, err)
 			}
 		}
 
 		hostPort := db.Resource.GetPort(db.DockerPort)
 		db.URL, err = dburl.Parse(fmt.Sprintf(db.DSN, hostPort))
 		if err != nil {
-			log.Fatalf("Failed to parse db URL %s: %v", db.DSN, err)
+			log.Fatalf("Failed to parse %s URL %s: %v", dbName, db.DSN, err)
 		}
 
 		if len(db.Exec) != 0 {
@@ -153,7 +169,7 @@ func TestMain(m *testing.M) {
 			}
 			readyURL, err := dburl.Parse(fmt.Sprintf(db.ReadyDSN, hostPort))
 			if err != nil {
-				log.Fatalf("Failed to parse db ready URL %s: %v", db.ReadyDSN, err)
+				log.Fatalf("Failed to parse %s ready URL %s: %v", dbName, db.ReadyDSN, err)
 			}
 			if err := pool.Retry(func() error {
 				readyDB, err := drivers.Open(readyURL, nil, nil)
@@ -162,29 +178,25 @@ func TestMain(m *testing.M) {
 				}
 				return readyDB.Ping()
 			}); err != nil {
-				log.Fatal("Timed out waiting for db to be ready: ", err)
+				log.Fatalf("Timed out waiting for %s to be ready: %s", dbName, err)
 			}
-			exitCode, err := db.Resource.Exec(db.Exec, dt.ExecOptions{
-				StdIn:  os.Stdin,
-				StdOut: os.Stdout,
-				StdErr: os.Stderr,
-				TTY:    true,
-			})
+			// No TTY attached to facilitate debugging with delve
+			exitCode, err := db.Resource.Exec(db.Exec, dt.ExecOptions{})
 			if err != nil || exitCode != 0 {
-				log.Fatal("Could not load schema: ", err)
+				log.Fatalf("Could not load schema for %s: %s", dbName, err)
 			}
 		}
 
 		// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
-		if err := pool.Retry(func() error {
-			var err error
-			db.DB, err = drivers.Open(db.URL, nil, nil)
-			if err != nil {
-				return err
+		var openErr error
+		if retryErr := pool.Retry(func() error {
+			db.DB, openErr = drivers.Open(db.URL, nil, nil)
+			if openErr != nil {
+				return openErr
 			}
 			return db.DB.Ping()
-		}); err != nil {
-			log.Fatal("Timed out waiting for db: ", err)
+		}); retryErr != nil {
+			log.Fatalf("Timed out waiting for %s:\n%s\n%s", dbName, retryErr, openErr)
 		}
 	}
 
@@ -204,8 +216,9 @@ func TestMain(m *testing.M) {
 
 func TestWriter(t *testing.T) {
 	type testFunc struct {
-		label string
-		f     func(w metadata.Writer) error
+		label  string
+		f      func(w metadata.Writer, u *dburl.URL) error
+		ignore string
 	}
 	testCases := []struct {
 		dbName string
@@ -216,32 +229,32 @@ func TestWriter(t *testing.T) {
 			funcs: []testFunc{
 				{
 					label: "descTable",
-					f: func(w metadata.Writer) error {
-						return w.DescribeTableDetails("film*", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.DescribeTableDetails(u, "film*", true, false)
 					},
 				},
 				{
 					label: "listTables",
-					f: func(w metadata.Writer) error {
-						return w.ListTables("tvmsE", "film*", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListTables(u, "tvmsE", "film*", true, false)
 					},
 				},
 				{
 					label: "listFuncs",
-					f: func(w metadata.Writer) error {
-						return w.DescribeFunctions("", "", false, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.DescribeFunctions(u, "", "", false, false)
 					},
 				},
 				{
 					label: "listIndexes",
-					f: func(w metadata.Writer) error {
-						return w.ListIndexes("", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListIndexes(u, "", true, false)
 					},
 				},
 				{
 					label: "listSchemas",
-					f: func(w metadata.Writer) error {
-						return w.ListSchemas("", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListSchemas(u, "", true, false)
 					},
 				},
 			},
@@ -251,32 +264,32 @@ func TestWriter(t *testing.T) {
 			funcs: []testFunc{
 				{
 					label: "descTable",
-					f: func(w metadata.Writer) error {
-						return w.DescribeTableDetails("film*", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.DescribeTableDetails(u, "film*", true, false)
 					},
 				},
 				{
 					label: "listTables",
-					f: func(w metadata.Writer) error {
-						return w.ListTables("tvmsE", "film*", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListTables(u, "tvmsE", "film*", true, false)
 					},
 				},
 				{
 					label: "listFuncs",
-					f: func(w metadata.Writer) error {
-						return w.DescribeFunctions("", "", false, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.DescribeFunctions(u, "", "", false, false)
 					},
 				},
 				{
 					label: "listIndexes",
-					f: func(w metadata.Writer) error {
-						return w.ListIndexes("", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListIndexes(u, "", true, false)
 					},
 				},
 				{
 					label: "listSchemas",
-					f: func(w metadata.Writer) error {
-						return w.ListSchemas("", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListSchemas(u, "", true, false)
 					},
 				},
 			},
@@ -286,32 +299,36 @@ func TestWriter(t *testing.T) {
 			funcs: []testFunc{
 				{
 					label: "descTable",
-					f: func(w metadata.Writer) error {
-						return w.DescribeTableDetails("film*", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.DescribeTableDetails(u, "film*", true, false)
 					},
+					// primary key indices get random names; ignore them
+					ignore: "PK__.*__.{16}",
 				},
 				{
 					label: "listTables",
-					f: func(w metadata.Writer) error {
-						return w.ListTables("tvmsE", "film*", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListTables(u, "tvmsE", "film*", true, false)
 					},
 				},
 				{
 					label: "listFuncs",
-					f: func(w metadata.Writer) error {
-						return w.DescribeFunctions("", "", false, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.DescribeFunctions(u, "", "", false, false)
 					},
 				},
 				{
 					label: "listIndexes",
-					f: func(w metadata.Writer) error {
-						return w.ListIndexes("", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListIndexes(u, "", true, false)
 					},
+					// primary key indices get random names; ignore them
+					ignore: "PK__.*__.{16}",
 				},
 				{
 					label: "listSchemas",
-					f: func(w metadata.Writer) error {
-						return w.ListSchemas("", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListSchemas(u, "", true, false)
 					},
 				},
 			},
@@ -321,20 +338,20 @@ func TestWriter(t *testing.T) {
 			funcs: []testFunc{
 				{
 					label: "descTable",
-					f: func(w metadata.Writer) error {
-						return w.DescribeTableDetails("order*", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.DescribeTableDetails(u, "order*", true, false)
 					},
 				},
 				{
 					label: "listTables",
-					f: func(w metadata.Writer) error {
-						return w.ListTables("tvmsE", "order*", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListTables(u, "tvmsE", "order*", true, false)
 					},
 				},
 				{
 					label: "listSchemas",
-					f: func(w metadata.Writer) error {
-						return w.ListSchemas("", true, false)
+					f: func(w metadata.Writer, u *dburl.URL) error {
+						return w.ListSchemas(u, "", true, false)
 					},
 				},
 			},
@@ -348,13 +365,16 @@ func TestWriter(t *testing.T) {
 				t.Fatalf("Cannot create results file %s: %v", actual, err)
 			}
 
-			db := dbs[test.dbName]
+			db, ok := dbs[test.dbName]
+			if !ok {
+				continue
+			}
 			w, err := drivers.NewMetadataWriter(context.Background(), db.URL, db.DB, fo)
 			if err != nil {
 				log.Fatalf("Could not create writer %s %s: %v", test.dbName, testFunc.label, err)
 			}
 
-			err = testFunc.f(w)
+			err = testFunc.f(w, db.URL)
 			if err != nil {
 				log.Fatalf("Could not write %s %s: %v", test.dbName, testFunc.label, err)
 			}
@@ -364,7 +384,7 @@ func TestWriter(t *testing.T) {
 			}
 
 			expected := fmt.Sprintf("testdata/%s.%s.expected.txt", test.dbName, testFunc.label)
-			err = filesEqual(expected, actual)
+			err = filesEqual(expected, actual, testFunc.ignore)
 			if err != nil {
 				t.Error(err)
 			}
@@ -373,10 +393,14 @@ func TestWriter(t *testing.T) {
 }
 
 func TestCopy(t *testing.T) {
+	pg, ok := dbs["pgsql"]
+	if !ok {
+		t.Skip("Skipping copy tests, as they require PostgreSQL which was not selected for tests")
+	}
 	// setup test data, ignoring errors, since there'll be duplicates
-	_, _ = dbs["pgsql"].DB.Exec("ALTER TABLE staff DROP CONSTRAINT staff_address_id_fkey")
-	_, _ = dbs["pgsql"].DB.Exec("ALTER TABLE staff DROP CONSTRAINT staff_store_id_fkey")
-	_, _ = dbs["pgsql"].DB.Exec("INSERT INTO staff VALUES (1, 'John', 'Doe', 1, 'john@invalid.com', 1, true, 'jdoe', 'abc', now(), 'abcd')")
+	_, _ = pg.DB.Exec("ALTER TABLE staff DROP CONSTRAINT staff_address_id_fkey")
+	_, _ = pg.DB.Exec("ALTER TABLE staff DROP CONSTRAINT staff_store_id_fkey")
+	_, _ = pg.DB.Exec("INSERT INTO staff VALUES (1, 'John', 'Doe', 1, 'john@invalid.com', 1, true, 'jdoe', 'abc', now(), 'abcd')")
 
 	type setupQuery struct {
 		query string
@@ -427,7 +451,10 @@ func TestCopy(t *testing.T) {
 		},
 	}
 	for _, test := range testCases {
-		db := dbs[test.dbName]
+		db, ok := dbs[test.dbName]
+		if !ok {
+			continue
+		}
 
 		// TODO test copy from a different DB, maybe csvq?
 		// TODO test copy from same DB
@@ -438,7 +465,7 @@ func TestCopy(t *testing.T) {
 				log.Fatalf("Failed to run setup query `%s`: %v", q.query, err)
 			}
 		}
-		rows, err := dbs["pgsql"].DB.Query(test.src)
+		rows, err := pg.DB.Query(test.src)
 		if err != nil {
 			log.Fatalf("Could not get rows to copy: %v", err)
 		}
@@ -456,17 +483,29 @@ func TestCopy(t *testing.T) {
 	}
 }
 
-func filesEqual(a, b string) error {
+// filesEqual compares the files at paths a and b and returns an error if
+// the content is not equal. Ignore is a regex. All matches will be removed
+// from the file contents before comparison.
+func filesEqual(a, b, ignore string) error {
 	// per comment, better to not read an entire file into memory
 	// this is simply a trivial example.
-	f1, err := ioutil.ReadFile(a)
+	f1, err := os.ReadFile(a)
 	if err != nil {
 		return fmt.Errorf("Cannot read file %s: %w", a, err)
 	}
 
-	f2, err := ioutil.ReadFile(b)
+	f2, err := os.ReadFile(b)
 	if err != nil {
 		return fmt.Errorf("Cannot read file %s: %w", b, err)
+	}
+
+	if ignore != "" {
+		reg, err := regexp.Compile(ignore)
+		if err != nil {
+			return fmt.Errorf("Cannot compile regex (%s): %w", ignore, err)
+		}
+		f1 = reg.ReplaceAllLiteral(f1, []byte{})
+		f2 = reg.ReplaceAllLiteral(f2, []byte{})
 	}
 
 	if !bytes.Equal(f1, f2) {

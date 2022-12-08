@@ -17,14 +17,17 @@ var (
 		infos.WithSequences(false),
 		infos.WithCheckConstraints(false),
 		infos.WithCustomClauses(map[infos.ClauseName]string{
+			infos.ColumnsDataType:                 "column_type",
 			infos.ColumnsNumericPrecRadix:         "10",
 			infos.FunctionColumnsNumericPrecRadix: "10",
 			infos.ConstraintIsDeferrable:          "''",
 			infos.ConstraintInitiallyDeferred:     "''",
+			infos.PrivilegesGrantor:               "''",
 			infos.ConstraintJoinCond:              "AND r.table_name = f.table_name",
 		}),
 		infos.WithSystemSchemas([]string{"mysql", "information_schema", "performance_schema", "sys"}),
 		infos.WithCurrentSchema("COALESCE(DATABASE(), '%')"),
+		infos.WithUsagePrivileges(false),
 	)
 	// NewCompleter for MySQL databases
 	NewCompleter = func(db drivers.DB, opts ...completer.Option) readline.AutoCompleter {

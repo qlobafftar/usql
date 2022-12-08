@@ -10,11 +10,13 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 
-	_ "github.com/denisenkom/go-mssqldb" // DRIVER: sqlserver
+	_ "github.com/microsoft/go-mssqldb" // DRIVER: sqlserver
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/google/go-cmp/cmp"
 	dt "github.com/ory/dockertest/v3"
 	dc "github.com/ory/dockertest/v3/docker"
 	_ "github.com/trinodb/trino-go-client/trino"
@@ -24,16 +26,17 @@ import (
 )
 
 type Database struct {
-	BuildArgs  []dc.BuildArg
-	RunOptions *dt.RunOptions
-	Exec       []string
-	Driver     string
-	URL        string
-	DockerPort string
-	Resource   *dt.Resource
-	DB         *sql.DB
-	Opts       []metadata.ReaderOption
-	Reader     metadata.BasicReader
+	BuildArgs    []dc.BuildArg
+	RunOptions   *dt.RunOptions
+	Exec         []string
+	Driver       string
+	URL          string
+	ReadinessURL string
+	DockerPort   string
+	Resource     *dt.Resource
+	DB           *sql.DB
+	Opts         []metadata.ReaderOption
+	Reader       metadata.BasicReader
 }
 
 const (
@@ -85,12 +88,16 @@ var (
 				infos.WithPlaceholder(func(int) string { return "?" }),
 				infos.WithCheckConstraints(false),
 				infos.WithCustomClauses(map[infos.ClauseName]string{
+					infos.ColumnsDataType:                 "column_type",
 					infos.ColumnsNumericPrecRadix:         "10",
 					infos.FunctionColumnsNumericPrecRadix: "10",
 					infos.ConstraintIsDeferrable:          "''",
 					infos.ConstraintInitiallyDeferred:     "''",
+					infos.PrivilegesGrantor:               "''",
 				}),
 				infos.WithSystemSchemas([]string{"mysql", "performance_schema", "information_schema"}),
+				infos.WithUsagePrivileges(false),
+				infos.WithSequences(false),
 			},
 		},
 		"sqlserver": {
@@ -104,10 +111,11 @@ var (
 				Name: "usql-sqlserver",
 				Env:  []string{"ACCEPT_EULA=Y", "SA_PASSWORD=" + pw},
 			},
-			Exec:       []string{"/opt/mssql-tools/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", pw, "-d", "master", "-i", "/schema/sql-server-sakila-schema.sql"},
-			Driver:     "sqlserver",
-			URL:        "sqlserver://sa:" + url.QueryEscape(pw) + "@127.0.0.1:%s?database=sakila",
-			DockerPort: "1433/tcp",
+			Exec:         []string{"/opt/mssql-tools/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", pw, "-d", "master", "-i", "/schema/sql-server-sakila-schema.sql"},
+			Driver:       "sqlserver",
+			URL:          "sqlserver://sa:" + url.QueryEscape(pw) + "@127.0.0.1:%s?database=sakila",
+			ReadinessURL: "sqlserver://sa:" + url.QueryEscape(pw) + "@127.0.0.1:%s",
+			DockerPort:   "1433/tcp",
 			Opts: []metadata.ReaderOption{
 				infos.WithPlaceholder(func(n int) string { return fmt.Sprintf("@p%d", n) }),
 				infos.WithIndexes(false),
@@ -128,6 +136,8 @@ var (
 					"INFORMATION_SCHEMA",
 					"sys",
 				}),
+				infos.WithUsagePrivileges(false),
+				infos.WithSequences(false),
 			},
 		},
 		"trino": {
@@ -184,7 +194,7 @@ func TestMain(m *testing.M) {
 		log.Fatalf("Could not connect to docker: %s", err)
 	}
 
-	for _, db := range dbs {
+	for dbName, db := range dbs {
 		var ok bool
 		db.Resource, ok = pool.ContainerByName(db.RunOptions.Name)
 		if !ok {
@@ -197,20 +207,18 @@ func TestMain(m *testing.M) {
 				log.Fatal("Could not start resource: ", err)
 			}
 		}
-
-		// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
-		if err := pool.Retry(func() error {
-			hostPort := db.Resource.GetPort(db.DockerPort)
-			var err error
-			db.DB, err = sql.Open(db.Driver, fmt.Sprintf(db.URL, hostPort))
-			if err != nil {
-				return err
-			}
-			return db.DB.Ping()
-		}); err != nil {
-			log.Fatal("Timed out waiting for db: ", err)
+		state := db.Resource.Container.State.Status
+		if state != "created" && state != "running" {
+			log.Fatalf("Unexpected container state for %s: %s", dbName, state)
 		}
-		db.Reader = infos.New(db.Opts...)(db.DB).(metadata.BasicReader)
+		url := db.URL
+		if db.ReadinessURL != "" {
+			url = db.ReadinessURL
+		}
+		port := db.Resource.GetPort(db.DockerPort)
+		if db.DB, err = waitForDbConnection(db.Driver, pool, url, port); err != nil {
+			log.Fatalf("Timed out waiting for %s: %s", dbName, err)
+		}
 
 		if len(db.Exec) != 0 {
 			exitCode, err := db.Resource.Exec(db.Exec, dt.ExecOptions{
@@ -223,6 +231,14 @@ func TestMain(m *testing.M) {
 				log.Fatal("Could not load schema: ", err)
 			}
 		}
+
+		// Reconnect with actual URL if a separate URL for readiness checking was used
+		if db.ReadinessURL != "" {
+			if db.DB, err = waitForDbConnection(db.Driver, pool, db.URL, port); err != nil {
+				log.Fatalf("Timed out waiting for %s: %s", dbName, err)
+			}
+		}
+		db.Reader = infos.New(db.Opts...)(db.DB).(metadata.BasicReader)
 	}
 
 	code := m.Run()
@@ -237,6 +253,22 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(code)
+}
+
+func waitForDbConnection(driver string, pool *dt.Pool, url string, port string) (*sql.DB, error) {
+	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
+	var db *sql.DB
+	if err := pool.Retry(func() error {
+		var err error
+		db, err = sql.Open(driver, fmt.Sprintf(url, port))
+		if err != nil {
+			return err
+		}
+		return db.Ping()
+	}); err != nil {
+		return nil, err
+	}
+	return db, nil
 }
 
 func TestSchemas(t *testing.T) {
@@ -310,11 +342,14 @@ func TestColumns(t *testing.T) {
 		"sqlserver": "film%",
 		"trino":     "orders",
 	}
-	expected := map[string]string{
+	expectedColumns := map[string]string{
 		"pgsql":     "film_id, title, description, release_year, language_id, original_language_id, rental_duration, rental_rate, length, replacement_cost, rating, last_update, special_features, fulltext, actor_id, film_id, last_update, film_id, category_id, last_update, fid, title, description, category, price, length, rating, actors",
 		"mysql":     "film_id, title, description, release_year, language_id, original_language_id, rental_duration, rental_rate, length, replacement_cost, rating, special_features, last_update, actor_id, film_id, last_update, film_id, category_id, last_update, FID, title, description, category, price, length, rating, actors, film_id, title, description",
 		"sqlserver": "film_id, title, description, release_year, language_id, original_language_id, rental_duration, rental_rate, length, replacement_cost, rating, special_features, last_update, actor_id, film_id, last_update, film_id, category_id, last_update, FID, title, description, category, price, length, rating, actors, film_id, title, description",
 		"trino":     "orderkey, custkey, orderstatus, totalprice, orderdate, orderpriority, clerk, shippriority, comment",
+	}
+	expectedTypes := map[string]string{
+		"mysql": "int unsigned, varchar(255), text, year, int unsigned, int unsigned, tinyint unsigned, decimal(4,2), smallint unsigned, decimal(5,2), enum('G','PG','PG-13','R','NC-17'), set('Trailers','Commentaries','Deleted Scenes','Behind the Scenes'), timestamp, int unsigned, int unsigned, timestamp, int unsigned, int unsigned, timestamp, int unsigned, varchar(255), text, varchar(25), decimal(4,2), smallint unsigned, enum('G','PG','PG-13','R','NC-17'), text, int, varchar(255), text",
 	}
 	for dbName, db := range dbs {
 		r := db.Reader
@@ -325,12 +360,18 @@ func TestColumns(t *testing.T) {
 		}
 
 		names := []string{}
+		types := []string{}
 		for result.Next() {
 			names = append(names, result.Get().Name)
+			types = append(types, result.Get().DataType)
 		}
-		actual := strings.Join(names, ", ")
-		if actual != expected[dbName] {
-			t.Errorf("Wrong %s column names, expected:\n  %v, got:\n  %v", dbName, expected[dbName], names)
+		actualColumns := strings.Join(names, ", ")
+		actualTypes := strings.Join(types, ", ")
+		if expected, ok := expectedColumns[dbName]; ok && actualColumns != expected {
+			t.Errorf("Wrong %s column names, expected:\n  %v, got:\n  %v", dbName, expected, names)
+		}
+		if expected, ok := expectedTypes[dbName]; ok && actualTypes != expected {
+			t.Errorf("Wrong %s column types, expected:\n  %v, got:\n  %v", dbName, expected, types)
 		}
 	}
 }
@@ -557,6 +598,418 @@ func TestSequences(t *testing.T) {
 		actual := strings.Join(names, ", ")
 		if actual != expected[dbName] {
 			t.Errorf("Wrong %s sequence names, expected:\n  %v\ngot:\n  %v", dbName, expected[dbName], names)
+		}
+	}
+}
+
+func TestPrivilegeSummaries_NonExistent(t *testing.T) {
+	type test struct {
+		Name   string
+		Db     *Database
+		Schema string
+	}
+	tests := map[string]test{
+		"pgsql":     {Db: dbs["pgsql"], Schema: "public"},
+		"mysql":     {Db: dbs["mysql"], Schema: "sakila"},
+		"sqlserver": {Db: dbs["sqlserver"], Schema: "dbo"},
+	}
+
+	for testName, test := range tests {
+		if test.Db != nil {
+			t.Run(testName, func(t *testing.T) {
+				table := "privtest_table"
+
+				// Read privileges
+				r := infos.New(test.Db.Opts...)(test.Db.DB).(metadata.PrivilegeSummaryReader)
+				result, err := r.PrivilegeSummaries(metadata.Filter{Schema: test.Schema, Name: table})
+				if err != nil {
+					t.Fatalf("Could not read privileges: %v", err)
+				}
+
+				// Check result
+				if result.Len() != 0 {
+					t.Errorf("Wrong result count, expected:\n  %d, got:\n  %d", 0, result.Len())
+				}
+			})
+		}
+	}
+}
+
+func TestPrivilegeSummaries(t *testing.T) {
+	type test struct {
+		Db             *Database
+		Schema         string
+		User           string
+		Create         string
+		CreateUserStmt string
+		DropUserStmt   string
+		Grants         []string
+		WantTable      metadata.ObjectPrivileges
+		WantColumn     metadata.ColumnPrivileges
+	}
+	setDefaults := func(t test) test {
+		if t.User == "" {
+			t.User = "privtest_user"
+		}
+		if t.Create == "" {
+			t.Create = "TABLE"
+		}
+		if t.CreateUserStmt == "" {
+			t.CreateUserStmt = "CREATE USER %s"
+		}
+		if t.DropUserStmt == "" {
+			t.DropUserStmt = "DROP USER %s"
+		}
+		if t.Grants == nil {
+			t.Grants = []string{}
+		}
+		if t.WantTable == nil {
+			t.WantTable = metadata.ObjectPrivileges{}
+		}
+		if t.WantColumn == nil {
+			t.WantColumn = metadata.ColumnPrivileges{}
+		}
+		return t
+	}
+	postgresDefaultTable := func() metadata.ObjectPrivileges {
+		return metadata.ObjectPrivileges{
+			metadata.ObjectPrivilege{Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "INSERT"},
+			metadata.ObjectPrivilege{Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "SELECT"},
+			metadata.ObjectPrivilege{Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "UPDATE"},
+			metadata.ObjectPrivilege{Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "DELETE"},
+			metadata.ObjectPrivilege{Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "TRUNCATE"},
+			metadata.ObjectPrivilege{Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "REFERENCES"},
+			metadata.ObjectPrivilege{Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "TRIGGER"},
+		}
+	}
+	postgresDefaultColumn := func(columns []string) metadata.ColumnPrivileges {
+		p := metadata.ColumnPrivileges{}
+		for _, col := range columns {
+			p = append(p,
+				metadata.ColumnPrivilege{Column: col, Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "INSERT"},
+				metadata.ColumnPrivilege{Column: col, Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: col, Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "UPDATE"},
+				metadata.ColumnPrivilege{Column: col, Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "REFERENCES"})
+		}
+		return p
+	}
+	tests := map[string]test{
+		"pgsql-no-grants": setDefaults(test{
+			Db:         dbs["pgsql"],
+			Schema:     "public",
+			Grants:     []string{},
+			WantTable:  postgresDefaultTable(),
+			WantColumn: postgresDefaultColumn([]string{"col1", "col2"}),
+		}),
+		"pgsql-sequence": setDefaults(test{
+			Db:     dbs["pgsql"],
+			Schema: "public",
+			Create: "SEQUENCE",
+			Grants: []string{"USAGE"},
+			WantTable: metadata.ObjectPrivileges{
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "USAGE"},
+				metadata.ObjectPrivilege{Grantee: "postgres", Grantor: "postgres", IsGrantable: true, PrivilegeType: "USAGE"},
+			},
+		}),
+		"pgsql-view": setDefaults(test{
+			Db:     dbs["pgsql"],
+			Schema: "public",
+			Create: "VIEW",
+			Grants: []string{"SELECT", "INSERT*"},
+			WantTable: append(postgresDefaultTable(),
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "postgres", IsGrantable: true, PrivilegeType: "INSERT"},
+			),
+			WantColumn: append(
+				postgresDefaultColumn([]string{"col1", "col2"}),
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: true, PrivilegeType: "INSERT"},
+				metadata.ColumnPrivilege{Column: "col2", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: "col2", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: true, PrivilegeType: "INSERT"},
+			),
+		}),
+		"pgsql-table": setDefaults(test{
+			Db:     dbs["pgsql"],
+			Schema: "public",
+			Grants: []string{"SELECT", "INSERT*"},
+			WantTable: append(postgresDefaultTable(),
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "postgres", IsGrantable: true, PrivilegeType: "INSERT"},
+			),
+			WantColumn: append(
+				postgresDefaultColumn([]string{"col1", "col2"}),
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: true, PrivilegeType: "INSERT"},
+				metadata.ColumnPrivilege{Column: "col2", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: "col2", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: true, PrivilegeType: "INSERT"},
+			),
+		}),
+		"pgsql-column": setDefaults(test{
+			Db:        dbs["pgsql"],
+			Schema:    "public",
+			Grants:    []string{"SELECT(col1)", "INSERT(col2)*"},
+			WantTable: postgresDefaultTable(),
+			WantColumn: append(
+				postgresDefaultColumn([]string{"col1", "col2"}),
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: "col2", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: true, PrivilegeType: "INSERT"},
+			),
+		}),
+		"pgsql-table-column": setDefaults(test{
+			Db:     dbs["pgsql"],
+			Schema: "public",
+			Grants: []string{"SELECT", "INSERT(col1)"},
+			WantTable: append(postgresDefaultTable(),
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+			),
+			WantColumn: append(
+				postgresDefaultColumn([]string{"col1", "col2"}),
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "INSERT"},
+				metadata.ColumnPrivilege{Column: "col2", Grantee: "privtest_user", Grantor: "postgres", IsGrantable: false, PrivilegeType: "SELECT"},
+			),
+		}),
+		"mysql-no-grants": setDefaults(test{
+			Db:        dbs["mysql"],
+			Schema:    "sakila",
+			User:      "'privtest_user'@'%'",
+			Grants:    []string{},
+			WantTable: metadata.ObjectPrivileges{},
+		}),
+		"mysql-view": setDefaults(test{
+			Db:     dbs["mysql"],
+			Schema: "sakila",
+			Create: "VIEW",
+			User:   "'privtest_user'@'%'",
+			Grants: []string{"SELECT", "INSERT"},
+			WantTable: metadata.ObjectPrivileges{
+				metadata.ObjectPrivilege{Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ObjectPrivilege{Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: false, PrivilegeType: "INSERT"},
+			},
+		}),
+		"mysql-view-grantable": setDefaults(test{
+			Db:     dbs["mysql"],
+			Schema: "sakila",
+			Create: "VIEW",
+			User:   "'privtest_user'@'%'",
+			Grants: []string{"SELECT*", "INSERT*"},
+			WantTable: metadata.ObjectPrivileges{
+				metadata.ObjectPrivilege{Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: true, PrivilegeType: "SELECT"},
+				metadata.ObjectPrivilege{Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: true, PrivilegeType: "INSERT"},
+			},
+		}),
+		"mysql-table": setDefaults(test{
+			Db:     dbs["mysql"],
+			Schema: "sakila",
+			User:   "'privtest_user'@'%'",
+			Grants: []string{"SELECT", "INSERT"},
+			WantTable: metadata.ObjectPrivileges{
+				metadata.ObjectPrivilege{Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ObjectPrivilege{Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: false, PrivilegeType: "INSERT"},
+			},
+		}),
+		"mysql-table-grantable": setDefaults(test{
+			Db:     dbs["mysql"],
+			Schema: "sakila",
+			User:   "'privtest_user'@'%'",
+			Grants: []string{"SELECT*", "INSERT*"},
+			WantTable: metadata.ObjectPrivileges{
+				metadata.ObjectPrivilege{Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: true, PrivilegeType: "SELECT"},
+				metadata.ObjectPrivilege{Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: true, PrivilegeType: "INSERT"},
+			},
+		}),
+		"mysql-column": setDefaults(test{
+			Db:     dbs["mysql"],
+			Schema: "sakila",
+			User:   "'privtest_user'@'%'",
+			Grants: []string{"SELECT(col1)", "INSERT(col2)"},
+			WantColumn: metadata.ColumnPrivileges{
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: "col2", Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: false, PrivilegeType: "INSERT"},
+			},
+		}),
+		"mysql-column-grantable": setDefaults(test{
+			Db:     dbs["mysql"],
+			Schema: "sakila",
+			User:   "'privtest_user'@'%'",
+			Grants: []string{"SELECT(col1)*", "INSERT(col2)*"},
+			WantColumn: metadata.ColumnPrivileges{
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: true, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: "col2", Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: true, PrivilegeType: "INSERT"},
+			},
+		}),
+		"mysql-table-column": setDefaults(test{
+			Db:     dbs["mysql"],
+			Schema: "sakila",
+			User:   "'privtest_user'@'%'",
+			Grants: []string{"SELECT", "INSERT(col1)"},
+			WantTable: metadata.ObjectPrivileges{
+				metadata.ObjectPrivilege{Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: false, PrivilegeType: "SELECT"},
+			},
+			WantColumn: metadata.ColumnPrivileges{
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "'privtest_user'@'%'", Grantor: "", IsGrantable: false, PrivilegeType: "INSERT"},
+			},
+		}),
+		"sqlserver-no-grants": setDefaults(test{
+			Db:             dbs["sqlserver"],
+			Schema:         "dbo",
+			CreateUserStmt: "CREATE LOGIN %[1]s WITH PASSWORD = 'yourStrong123_Password'; CREATE USER %[1]s FOR LOGIN %[1]s",
+			DropUserStmt:   "DROP USER %[1]s; DROP LOGIN %[1]s",
+			Grants:         []string{},
+			WantTable:      metadata.ObjectPrivileges{},
+		}),
+		"sqlserver-view": setDefaults(test{
+			Db:             dbs["sqlserver"],
+			Schema:         "dbo",
+			Create:         "VIEW",
+			CreateUserStmt: "CREATE LOGIN %[1]s WITH PASSWORD = 'yourStrong123_Password'; CREATE USER %[1]s FOR LOGIN %[1]s",
+			DropUserStmt:   "DROP USER %[1]s; DROP LOGIN %[1]s",
+			Grants:         []string{"SELECT", "INSERT*"},
+			WantTable: metadata.ObjectPrivileges{
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "dbo", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "dbo", IsGrantable: true, PrivilegeType: "INSERT"},
+			},
+		}),
+		"sqlserver-table": setDefaults(test{
+			Db:             dbs["sqlserver"],
+			Schema:         "dbo",
+			CreateUserStmt: "CREATE LOGIN %[1]s WITH PASSWORD = 'yourStrong123_Password'; CREATE USER %[1]s FOR LOGIN %[1]s",
+			DropUserStmt:   "DROP USER %[1]s; DROP LOGIN %[1]s",
+			Grants:         []string{"SELECT", "INSERT*"},
+			WantTable: metadata.ObjectPrivileges{
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "dbo", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "dbo", IsGrantable: true, PrivilegeType: "INSERT"},
+			},
+		}),
+		"sqlserver-column": setDefaults(test{
+			Db:             dbs["sqlserver"],
+			Schema:         "dbo",
+			CreateUserStmt: "CREATE LOGIN %[1]s WITH PASSWORD = 'yourStrong123_Password'; CREATE USER %[1]s FOR LOGIN %[1]s",
+			DropUserStmt:   "DROP USER %[1]s; DROP LOGIN %[1]s",
+			Grants:         []string{"SELECT(col1)", "UPDATE(col2)*"},
+			WantColumn: metadata.ColumnPrivileges{
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "privtest_user", Grantor: "dbo", IsGrantable: false, PrivilegeType: "SELECT"},
+				metadata.ColumnPrivilege{Column: "col2", Grantee: "privtest_user", Grantor: "dbo", IsGrantable: true, PrivilegeType: "UPDATE"},
+			},
+		}),
+		"sqlserver-table-column": setDefaults(test{
+			Db:             dbs["sqlserver"],
+			Schema:         "dbo",
+			CreateUserStmt: "CREATE LOGIN %[1]s WITH PASSWORD = 'yourStrong123_Password'; CREATE USER %[1]s FOR LOGIN %[1]s",
+			DropUserStmt:   "DROP USER %[1]s; DROP LOGIN %[1]s",
+			Grants:         []string{"SELECT", "UPDATE(col1)"},
+			WantTable: metadata.ObjectPrivileges{
+				metadata.ObjectPrivilege{Grantee: "privtest_user", Grantor: "dbo", IsGrantable: false, PrivilegeType: "SELECT"},
+			},
+			WantColumn: metadata.ColumnPrivileges{
+				metadata.ColumnPrivilege{Column: "col1", Grantee: "privtest_user", Grantor: "dbo", IsGrantable: false, PrivilegeType: "UPDATE"},
+			},
+		}),
+	}
+
+	for testName, test := range tests {
+		if test.Db != nil {
+			t.Run(testName, func(t *testing.T) {
+				// Create user, table and grants
+				const name = "privtest"
+				var query string
+				var err error
+				query = fmt.Sprintf(test.CreateUserStmt, test.User)
+				_, err = test.Db.DB.Exec(query)
+				if err != nil {
+					t.Fatalf("Could not CREATE USER:\n%s\n%s", query, err)
+				}
+				defer test.Db.DB.Exec(fmt.Sprintf(test.DropUserStmt, test.User))
+
+				switch test.Create {
+				case "TABLE":
+					query = fmt.Sprintf("CREATE TABLE %s.%s (col1 int, col2 varchar(255))", test.Schema, name)
+					_, err = test.Db.DB.Exec(query)
+					if err != nil {
+						t.Fatalf("Could not CREATE TABLE:\n%s\n%s", query, err)
+					}
+					defer test.Db.DB.Exec(fmt.Sprintf("DROP TABLE %s.%s", test.Schema, name))
+				case "VIEW":
+					query = fmt.Sprintf("CREATE TABLE %s.%s_table (col1 int, col2 varchar(255))", test.Schema, name)
+					_, err = test.Db.DB.Exec(query)
+					if err != nil {
+						t.Fatalf("Could not CREATE TABLE:\n%s\n%s", query, err)
+					}
+					defer test.Db.DB.Exec(fmt.Sprintf("DROP TABLE %s.%s_table", test.Schema, name))
+					query = fmt.Sprintf("CREATE VIEW %s.%s AS SELECT * FROM %[1]s.%[2]s_table", test.Schema, name)
+					_, err = test.Db.DB.Exec(query)
+					if err != nil {
+						t.Fatalf("Could not CREATE VIEW:\n%s\n%s", query, err)
+					}
+					defer test.Db.DB.Exec(fmt.Sprintf("DROP VIEW %s.%s", test.Schema, name))
+				case "SEQUENCE":
+					query = fmt.Sprintf("CREATE SEQUENCE %s.%s", test.Schema, name)
+					_, err = test.Db.DB.Exec(query)
+					if err != nil {
+						t.Fatalf("Could not CREATE SEQUENCE:\n%s\n%s", query, err)
+					}
+					defer test.Db.DB.Exec(fmt.Sprintf("DROP SEQUENCE %s.%s", test.Schema, name))
+				}
+
+				for _, grant := range test.Grants {
+					isGrantable := false
+					if grant[len(grant)-1] == '*' {
+						isGrantable = true
+						grant = grant[:len(grant)-1]
+					}
+					query = fmt.Sprintf("GRANT %s ON %s.%s TO %s", grant, test.Schema, name, test.User)
+					if isGrantable {
+						query += " WITH GRANT OPTION"
+					}
+					_, err = test.Db.DB.Exec(query)
+					if err != nil {
+						t.Fatalf("Could not GRANT %s:\n%s\n%s", grant, query, err)
+					}
+				}
+
+				// Read privileges
+				r := infos.New(test.Db.Opts...)(test.Db.DB).(metadata.PrivilegeSummaryReader)
+				types := []string{"TABLE", "BASE TABLE", "SYSTEM TABLE", "SYNONYM", "LOCAL TEMPORARY", "GLOBAL TEMPORARY", "VIEW", "SYSTEM VIEW", "MATERIALIZED VIEW", "SEQUENCE"}
+				result, err := r.PrivilegeSummaries(metadata.Filter{Schema: test.Schema, Name: name, Types: types})
+				if err != nil {
+					t.Fatalf("Could not read privileges: %v", err)
+				}
+
+				// Check result
+				if result.Len() != 1 {
+					t.Fatalf("Wrong result count\nWant:\t%d\nGot:\t%d\n", 1, result.Len())
+				}
+				result.Next()
+				if result.Get().Schema != test.Schema {
+					t.Errorf("Wrong schema!\nWant:\t%s\nGot:\t%s\n", test.Schema, result.Get().Schema)
+				}
+				if result.Get().Name != name {
+					t.Errorf("Wrong table!\nWant:\t%s\nGot:\t%s\n", name, result.Get().Name)
+				}
+				want := ""
+				switch test.Create {
+				case "TABLE":
+					want = "BASE TABLE"
+				default:
+					want = test.Create
+				}
+				if result.Get().ObjectType != want {
+					t.Errorf("Wrong Type!\nWant:\t%s\nGot:\t%s\n", want, result.Get().ObjectType)
+				}
+				gotTablePrivileges := result.Get().ObjectPrivileges
+				sort.Sort(gotTablePrivileges)
+				sort.Sort(test.WantTable)
+				if diff := cmp.Diff(test.WantTable, gotTablePrivileges); diff != "" {
+					t.Errorf("Wrong object privileges!\n(-expected, +got):\n%s", diff)
+				}
+
+				gotColumnPrivileges := result.Get().ColumnPrivileges
+				sort.Sort(gotColumnPrivileges)
+				sort.Sort(test.WantColumn)
+				if diff := cmp.Diff(test.WantColumn, gotColumnPrivileges); diff != "" {
+					t.Errorf("Wrong column privileges!\n(-expected, +got):\n%s", diff)
+				}
+			})
 		}
 	}
 }

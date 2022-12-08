@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	syslocale "github.com/jeandeaual/go-locale"
 	"github.com/xo/terminfo"
 	"github.com/xo/usql/text"
 )
@@ -38,7 +39,7 @@ var vars, pvars Vars
 func init() {
 	// get USQL_* variables
 	enableHostInformation := "true"
-	if v := Getenv("USQL_SHOW_HOST_INFORMATION"); v != "" {
+	if v, _ := Getenv(strings.ToUpper(text.CommandName) + "_SHOW_HOST_INFORMATION"); v != "" {
 		enableHostInformation = v
 	}
 	// get color level
@@ -47,8 +48,10 @@ func init() {
 	if colorLevel < terminfo.ColorLevelBasic {
 		enableSyntaxHL = "false"
 	}
-	pager, pagerCmd := "off", Getenv("USQL_PAGER", "PAGER")
-	if pagerCmd == "" {
+	// pager
+	pagerCmd, ok := Getenv(strings.ToUpper(text.CommandName)+"_PAGER", "PAGER")
+	pager := "off"
+	if !ok {
 		for _, s := range []string{"less", "more"} {
 			if _, err := exec.LookPath(s); err == nil {
 				pagerCmd = s
@@ -59,15 +62,26 @@ func init() {
 	if pagerCmd != "" {
 		pager = "on"
 	}
+	// editor
+	editorCmd, _ := Getenv(strings.ToUpper(text.CommandName)+"_EDITOR", "EDITOR", "VISUAL")
 	vars = Vars{
 		// usql related logic
 		"SHOW_HOST_INFORMATION": enableHostInformation,
 		"PAGER":                 pagerCmd,
+		"EDITOR":                editorCmd,
+		"ON_ERROR_STOP":         "off",
+		// prompts
+		"PROMPT1": "%S%N%m%/%R%# ",
 		// syntax highlighting variables
 		"SYNTAX_HL":             enableSyntaxHL,
 		"SYNTAX_HL_FORMAT":      colorLevel.ChromaFormatterName(),
 		"SYNTAX_HL_STYLE":       "monokai",
 		"SYNTAX_HL_OVERRIDE_BG": "true",
+	}
+	// determine locale
+	locale := "en-US"
+	if s, err := syslocale.GetLocale(); err == nil {
+		locale = s
 	}
 	pvars = Vars{
 		"border":                   "1",
@@ -79,10 +93,11 @@ func init() {
 		"footer":                   "on",
 		"format":                   "aligned",
 		"linestyle":                "ascii",
+		"locale":                   locale,
 		"null":                     "",
 		"numericlocale":            "off",
-		"pager":                    pager,
 		"pager_min_lines":          "0",
+		"pager":                    pager,
 		"recordsep":                "\n",
 		"recordsep_zero":           "off",
 		"tableattr":                "",
@@ -112,17 +127,15 @@ func ValidIdentifier(n string) error {
 
 // Set sets a variable.
 func Set(name, value string) error {
-	err := ValidIdentifier(name)
-	if err != nil {
+	if err := ValidIdentifier(name); err != nil {
 		return err
 	}
-	switch name {
-	case "QUIET":
+	if name == "ON_ERROR_STOP" || name == "QUIET" {
 		if value == "" {
 			value = "on"
 		} else {
-			value, err = ParseBool(value, name)
-			if err != nil {
+			var err error
+			if value, err = ParseBool(value, name); err != nil {
 				return err
 			}
 		}
@@ -271,7 +284,7 @@ func Ptoggle(name, extra string) (string, error) {
 			pvars[name] = "aligned"
 		}
 	case "linestyle":
-	case "csv_fieldsep", "fieldsep", "null", "recordsep", "time":
+	case "csv_fieldsep", "fieldsep", "null", "recordsep", "time", "locale":
 	case "tableattr", "title":
 		pvars[name] = ""
 	case "unicode_border_linestyle", "unicode_column_linestyle", "unicode_header_linestyle":
@@ -294,7 +307,7 @@ func Pset(name, value string) (string, error) {
 	case "pager":
 		s, err := ParseKeywordBool(value, name, "always")
 		if err != nil {
-			return "", text.ErrInvalidFormatExpandedType
+			return "", text.ErrInvalidFormatPagerType
 		}
 		pvars[name] = s
 	case "expanded":
@@ -319,7 +332,7 @@ func Pset(name, value string) (string, error) {
 			return "", text.ErrInvalidFormatLineStyle
 		}
 		pvars[name] = value
-	case "csv_fieldsep", "fieldsep", "null", "recordsep", "tableattr", "time", "title":
+	case "csv_fieldsep", "fieldsep", "null", "recordsep", "tableattr", "time", "title", "locale":
 		pvars[name] = value
 	case "unicode_border_linestyle", "unicode_column_linestyle", "unicode_header_linestyle":
 		if !borderRE.MatchString(value) {

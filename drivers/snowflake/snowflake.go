@@ -1,7 +1,6 @@
 // Package snowflake defines and registers usql's Snowflake driver.
 //
 // See: https://github.com/snowflakedb/gosnowflake
-// Group: all
 package snowflake
 
 import (
@@ -31,6 +30,7 @@ func init() {
 		infos.WithFunctions(false),
 		infos.WithIndexes(false),
 		infos.WithConstraints(false),
+		infos.WithColumnPrivileges(false),
 	)
 	drivers.Register("snowflake", drivers.Driver{
 		Err: func(err error) (string, string) {

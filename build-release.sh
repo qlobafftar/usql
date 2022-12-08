@@ -8,14 +8,18 @@ VER=
 BUILD=$SRC/build
 STATIC=0
 FORCE=0
+CHECK=1
+UPX=1
 
 OPTIND=1
-while getopts "b:v:sfr" opt; do
+while getopts "b:v:sfrnN" opt; do
 case "$opt" in
   b) BUILD=$OPTARG ;;
   v) VER=$OPTARG ;;
   s) STATIC=1 ;;
   f) FORCE=1 ;;
+  n) CHECK=0 ;;
+  N) UPX=0 ;;
   r)
     # get latest tag version
     pushd $SRC &> /dev/null
@@ -31,12 +35,12 @@ if [ "$VER" = "" ]; then
   FORCE=1
 fi
 
-PLATFORM=$(uname|sed -e 's/_.*//'|tr '[:upper:]' '[:lower:]'|sed -e 's/^\(msys\|mingw\).*/windows/')
-ARCH=amd64
+PLATFORM=$(go env GOOS)
+ARCH=$(go env GOARCH)
 NAME=$(basename $SRC)
 VER="${VER#v}"
 EXT=tar.bz2
-DIR=$BUILD/$PLATFORM/$VER
+DIR=$BUILD/$PLATFORM/$ARCH/$VER
 BIN=$DIR/$NAME
 
 TAGS=(
@@ -51,7 +55,7 @@ TAGS=(
 )
 case $PLATFORM in
   darwin|linux)
-    TAGS+=(sqlite_icu no_adodb)
+    TAGS+=(no_adodb)
   ;;
   windows)
     EXT=zip
@@ -78,9 +82,6 @@ if [ "$STATIC" = "1" ]; then
       )
       EXTLDFLAGS=(
         -static
-        -licuuc
-        -licui18n
-        -licudata
         -lm
         -ldl
       )
@@ -100,7 +101,7 @@ fi
 
 # check not overwriting existing build artifacts
 if [[ -e $OUT && "$FORCE" != "1" ]]; then
-  echo "error: $OUT exists and FORCE!=1 (try $0 -f)"
+  echo "error: $OUT exists and FORCE != 1 (try $0 -f)"
   exit 1
 fi
 
@@ -121,6 +122,7 @@ echo "BUILD TAGS:  $TAGS"
 echo "LDFLAGS:     $LDFLAGS"
 
 pushd $SRC &> /dev/null
+
 if [ -f $OUT ]; then
   echo "REMOVING:    $OUT"
   rm -rf $OUT
@@ -132,41 +134,52 @@ echo "BUILDING:    $BIN"
 echo "BUILD:"
 (set -x;
   go build \
-    -tags="$TAGS" \
     -ldflags="$LDFLAGS" \
+    -tags="$TAGS" \
+    -trimpath \
     -o $BIN
 ) 2>&1 | log '    '
 
-# strip
-case $PLATFORM in
-  linux|windows|darwin)
-    echo "STRIPPING:   $BIN"
-    strip $BIN
-  ;;
-esac
-
-# compress
-case $PLATFORM in
-  linux|windows|darwin)
-    COMPRESSED=$(upx -q -q $BIN|awk '{print $1 " -> " $3 " (" $4 ")"}')
-    echo "COMPRESSED:  $COMPRESSED"
-  ;;
-esac
+# upx
+if [[ "$UPX" == "1" ]]; then
+  case $PLATFORM in
+    linux|windows|darwin)
+      COMPRESSED=$(upx -q -q $BIN|awk '{print $1 " -> " $3 " (" $4 ")"}')
+      echo "COMPRESSED:  $COMPRESSED"
+    ;;
+  esac
+fi
 
 # check build
-BUILT_VER=$($BIN --version)
-if [ "$BUILT_VER" != "$NAME ${VER#v}" ]; then
-  echo -e "\n\nerror: expected $NAME --version to report '$NAME ${VER#v}', got: '$BUILT_VER'"
-  exit 1
+if [[ "$CHECK" == "1" ]]; then
+  BUILT_VER=$($BIN --version)
+  if [ "$BUILT_VER" != "$NAME ${VER#v}" ]; then
+    echo -e "\n\nerror: expected $NAME --version to report '$NAME ${VER#v}', got: '$BUILT_VER'"
+    exit 1
+  fi
+  echo "REPORTED:    $BUILT_VER"
 fi
-echo "REPORTED:    $BUILT_VER"
+
+# pack
+cp $SRC/LICENSE $DIR
 case $EXT in
   tar.bz2)
-    tar -C $DIR -cjf $OUT $(basename $BIN)
+    tar -C $DIR -cjf $OUT $(basename $BIN) LICENSE
   ;;
   zip)
-    zip $OUT -j $BIN
+    zip $OUT -j $BIN LICENSE
   ;;
 esac
+
+# report
 echo "PACKED:      $OUT ($(du -sh $OUT|awk '{print $1}'))"
+case $EXT in
+  tar.bz2)
+    tar -jvtf $OUT
+  ;;
+  zip)
+    unzip -l $OUT
+  ;;
+esac
+
 popd &> /dev/null

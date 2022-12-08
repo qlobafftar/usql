@@ -254,6 +254,28 @@ func TestNextResetState(t *testing.T) {
 	}
 }
 
+func TestEmptyVariablesRawString(t *testing.T) {
+	stmt := new(Stmt)
+	stmt.AppendString("select ", "\n")
+	stmt.Prefix = "SELECT"
+	v := &Var{
+		I:    7,
+		End:  9,
+		Name: "a",
+		Len:  0,
+	}
+	stmt.Vars = append(stmt.Vars, v)
+
+	if exp, got := "select ", stmt.RawString(); exp != got {
+		t.Fatalf("Defined=false, expected: %s, got: %s", exp, got)
+	}
+
+	v.Defined = true
+	if exp, got := "select :a", stmt.RawString(); exp != got {
+		t.Fatalf("Defined=true, expected: %s, got: %s", exp, got)
+	}
+}
+
 // cc combines commands with params.
 func cc(cmds []string, params []string) []string {
 	if len(cmds) == 0 {

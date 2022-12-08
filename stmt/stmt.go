@@ -22,6 +22,8 @@ type Var struct {
 	Name string
 	// Len is the length of the replaced variable.
 	Len int
+	// Defined indicates whether the variable has been defined.
+	Defined bool
 }
 
 // String satisfies the fmt.Stringer interface.
@@ -99,7 +101,7 @@ func (b *Stmt) RawString() string {
 	var i int
 	// deinterpolate vars
 	for _, v := range b.Vars {
-		if v.Len == 0 {
+		if !v.Defined {
 			continue
 		}
 		if len(s) > i {
@@ -160,29 +162,30 @@ var lineend = []rune{'\n'}
 // called again only after any remaining collected runes have been processed.
 //
 // Example:
-//     buf := stmt.New(runeSrc)
-//     for {
-//         cmd, params, err := buf.Next(unquoteFunc)
-//         if err { /* ... */ }
 //
-//         execute, quit := buf.Ready() || cmd == "g", cmd == "q"
+//	buf := stmt.New(runeSrc)
+//	for {
+//	    cmd, params, err := buf.Next(unquoteFunc)
+//	    if err { /* ... */ }
 //
-//         // process command ...
-//         switch cmd {
-//             /* ... */
-//         }
+//	    execute, quit := buf.Ready() || cmd == "g", cmd == "q"
 //
-//         if quit {
-//             break
-//         }
+//	    // process command ...
+//	    switch cmd {
+//	        /* ... */
+//	    }
 //
-//         if execute {
-//            s := buf.String()
-//            res, err := db.Query(s)
-//            /* handle database ... */
-//            buf.Reset(nil)
-//         }
-//     }
+//	    if quit {
+//	        break
+//	    }
+//
+//	    if execute {
+//	       s := buf.String()
+//	       res, err := db.Query(s)
+//	       /* handle database ... */
+//	       buf.Reset(nil)
+//	    }
+//	}
 func (b *Stmt) Next(unquote func(string, bool) (bool, string, error)) (string, string, error) {
 	var err error
 	var i int
@@ -244,6 +247,7 @@ parse:
 				}
 				b.Vars = append(b.Vars, v)
 				if ok, z, _ := unquote(q+v.Name+q, true); ok {
+					v.Defined = true
 					b.r, b.rlen = substituteVar(b.r, v, z)
 					i--
 				}
@@ -315,7 +319,7 @@ parse:
 		b.Append(b.r[st:i], lineend)
 	}
 	// set prefix
-	b.Prefix = findPrefix(b.Buf, prefixCount)
+	b.Prefix = findPrefix(b.Buf, prefixCount, b.allowCComments, b.allowHashComments, b.allowMultilineComments)
 	// reset r
 	b.r = b.r[i:]
 	b.rlen = len(b.r)

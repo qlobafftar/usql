@@ -62,7 +62,11 @@ func main() {
 			if t, ok := m[tag]; ok {
 				tag = t
 			}
-			fmt.Fprintf(os.Stderr, "\ntry:\n\n  go get -u -tags %s github.com/xo/usql\n\n", tag)
+			rev := "latest"
+			if text.CommandVersion == "0.0.0-dev" || strings.Contains(text.CommandVersion, "-") {
+				rev = "master"
+			}
+			fmt.Fprintf(os.Stderr, "\ntry:\n\n  go install -tags %s github.com/xo/usql@%s\n\n", tag, rev)
 		}
 		os.Exit(1)
 	}
@@ -154,7 +158,7 @@ func run(args *Args, u *user.User) error {
 	return nil
 }
 
-// runCommandOrFiles proccesses all the supplied commands or files.
+// runCommandOrFiles processes all the supplied commands or files.
 func runCommandOrFiles(h *handler.Handler, commandsOrFiles []CommandOrFile) func() error {
 	return func() error {
 		for _, x := range commandsOrFiles {

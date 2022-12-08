@@ -41,7 +41,7 @@ var (
 	HelpCommandPrefix = `Type:  `
 	HelpCommands      = [][]string{
 		{`copyright`, `for distribution terms`},
-		//[]string{`h`, `for help with SQL commands`},
+		//{`h`, `for help with SQL commands`},
 		{`?`, `for help with ` + CommandName + ` commands`},
 		{`g`, `or terminate with semicolon to execute query`},
 		{`q`, `to quit`},
@@ -60,6 +60,7 @@ var (
 		`footer`:                   `Default footer is %s.`,
 		`format`:                   `Output format is %s.`,
 		`linestyle`:                `Line style is %s.`,
+		`locale`:                   `Locale is %q.`,
 		`null`:                     `Null display is %q.`,
 		`numericlocale`:            `Locale-adjusted numeric output is %s.`,
 		`pager`:                    `Pager usage is %s.`,

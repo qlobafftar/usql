@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"os/user"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -23,9 +24,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alecthomas/chroma"
-	"github.com/alecthomas/chroma/formatters"
-	"github.com/alecthomas/chroma/styles"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/xo/dburl"
 	"github.com/xo/dburl/passfile"
 	"github.com/xo/tblfmt"
@@ -232,7 +233,7 @@ func (h *Handler) Run() error {
 		var execute bool
 		// set prompt
 		if iactive {
-			h.l.Prompt(h.Prompt())
+			h.l.Prompt(h.Prompt(env.Get("PROMPT1")))
 		}
 		// read next statement/command
 		cmd, paramstr, err := h.buf.Next(env.Unquote(h.user, false, env.All()))
@@ -363,7 +364,7 @@ func (h *Handler) Run() error {
 				// force a transaction for batched queries for certain drivers
 				var forceBatch bool
 				if h.u != nil {
-					_, _, forceBatch = drivers.IsBatchQueryPrefix(h.u, stmt.FindPrefix(h.last))
+					_, _, forceBatch = drivers.IsBatchQueryPrefix(h.u, stmt.FindPrefix(h.last, true, true, true))
 					forceBatch = forceBatch && drivers.BatchAsTransaction(h.u)
 				}
 				// execute
@@ -374,7 +375,18 @@ func (h *Handler) Run() error {
 				ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 				if err = h.Execute(ctx, out, opt, h.lastPrefix, h.last, forceBatch); err != nil {
 					lastErr = WrapErr(h.last, err)
-					fmt.Fprintln(stderr, "error:", err)
+					if env.All()["ON_ERROR_STOP"] == "on" {
+						if iactive {
+							fmt.Fprintln(stderr, "error:", err)
+							h.buf.Reset([]rune{}) // empty the buffer so no other statements are run
+							continue
+						} else {
+							stop()
+							return err
+						}
+					} else {
+						fmt.Fprintln(stderr, "error:", err)
+					}
 				}
 				stop()
 			}
@@ -426,20 +438,180 @@ func (h *Handler) Reset(r []rune) {
 	h.last, h.lastPrefix, h.lastRaw, h.batch, h.batchEnd = "", "", "", false, ""
 }
 
-// Prompt creates the prompt text.
-func (h *Handler) Prompt() string {
-	s := text.NotConnected
-	if h.db != nil {
-		s = h.u.Short()
-		if s == "" {
-			s = "(" + h.u.Driver + ")"
+// Prompt parses a prompt.
+//
+// NOTE: the documentation below is INCORRECT, as it is just copied from
+// https://www.postgresql.org/docs/current/app-psql.html#APP-PSQL-PROMPTING
+//
+// TODO/FIXME: complete this functionality (from psql documentation):
+//
+//	%M - The full host name (with domain name) of the database server, or
+//	[local] if the connection is over a Unix domain socket, or
+//	[local:/dir/name], if the Unix domain socket is not at the compiled in
+//	default location.
+//
+//	%m - The host name of the database server, truncated at the first dot, or
+//	[local] if the connection is over a Unix domain socket.
+//
+//	%> - The port number at which the database server is listening.
+//
+//	%n - The database session user name. (The expansion of this value might
+//	change during a database session as the result of the command SET SESSION
+//	AUTHORIZATION.)
+//
+//	%/ - The name of the current database.
+//
+//	%~ - Like %/, but the output is ~ (tilde) if the database is your default
+//	database.
+//
+//	%# - If the session user is a database superuser, then a #, otherwise a >.
+//	(The expansion of this value might change during a database session as the
+//	result of the command SET SESSION AUTHORIZATION.)
+//
+//	%p - The process ID of the backend currently connected to.
+//
+//	%R - In prompt 1 normally =, but @ if the session is in an inactive branch
+//	of a conditional block, or ^ if in single-line mode, or ! if the session is
+//	disconnected from the database (which can happen if \connect fails). In
+//	prompt 2 %R is replaced by a character that depends on why psql expects
+//	more input: - if the command simply wasn't terminated yet, but * if there
+//	is an unfinished /* ... */ comment, a single quote if there is an
+//	unfinished quoted string, a double quote if there is an unfinished quoted
+//	identifier, a dollar sign if there is an unfinished dollar-quoted string,
+//	or ( if there is an unmatched left parenthesis. In prompt 3 %R doesn't
+//	produce anything.
+//
+//	%x - Transaction status: an empty string when not in a transaction block,
+//	or * when in a transaction block, or ! when in a failed transaction block,
+//	or ? when the transaction state is indeterminate (for example, because
+//	there is no connection).
+//
+//	%l - The line number inside the current statement, starting from 1.
+//
+//	%digits - The character with the indicated octal code is substituted.
+//
+//	%:name: - The value of the psql variable name. See Variables, above, for
+//	details.
+//
+//	%`command` - The output of command, similar to ordinary “back-tick”
+//	substitution.
+//
+//	%[ ... %] - Prompts can contain terminal control characters which, for
+//	example, change the color, background, or style of the prompt text, or
+//	change the title of the terminal window. In order for the line editing
+//	features of Readline to work properly, these non-printing control
+//	characters must be designated as invisible by surrounding them with %[ and
+//	%]. Multiple pairs of these can occur within the prompt. For example:
+//
+//	testdb=> \set PROMPT1 '%[%033[1;33;40m%]%n@%/%R%[%033[0m%]%# '
+//
+//	results in a boldfaced (1;) yellow-on-black (33;40) prompt on
+//	VT100-compatible, color-capable terminals.
+//
+//	%w - Whitespace of the same width as the most recent output of PROMPT1.
+//	This can be used as a PROMPT2 setting, so that multi-line statements are
+//	aligned with the first line, but there is no visible secondary prompt.
+//
+// To insert a percent sign into your prompt, write %%. The default prompts are
+// '%/%R%x%# ' for prompts 1 and 2, and '>> ' for prompt 3.
+func (h *Handler) Prompt(prompt string) string {
+	r, connected := []rune(prompt), h.db != nil
+	end := len(r)
+	var buf []byte
+	for i := 0; i < end; i++ {
+		if r[i] != '%' {
+			buf = append(buf, string(r[i])...)
+			continue
 		}
+		switch grab(r, i+1, end) {
+		case '%': // literal
+			buf = append(buf, '%')
+		case 'S': // short driver name
+			if connected {
+				buf = append(buf, dburl.ShortAlias(h.u.Scheme)+":"...)
+			} else {
+				buf = append(buf, text.NotConnected...)
+			}
+		case 'u': // dburl short
+			if connected {
+				buf = append(buf, h.u.Short()...)
+			} else {
+				buf = append(buf, text.NotConnected...)
+			}
+		case 'M': // full host name with domain
+			if connected {
+				buf = append(buf, h.u.Hostname()...)
+			}
+		case 'm': // host name truncated at first dot, or [local] if it's a domain socket
+			if connected {
+				s := h.u.Hostname()
+				if i := strings.Index(s, "."); i != -1 {
+					s = s[:i]
+				}
+				buf = append(buf, s...)
+			}
+		case '>': // the port number
+			if connected {
+				s := h.u.Port()
+				if s != "" {
+					s = ":" + s
+				}
+				buf = append(buf, s...)
+			}
+		case 'N': // database user
+			if connected && h.u.User != nil {
+				s := h.u.User.Username()
+				if s != "" {
+					buf = append(buf, s+"@"...)
+				}
+			}
+		case 'n': // database user
+			if connected && h.u.User != nil {
+				buf = append(buf, h.u.User.Username()...)
+			}
+		case '/': // database name
+			switch {
+			case connected && h.u.Opaque != "":
+				buf = append(buf, h.u.Opaque...)
+			case connected && h.u.Path != "" && h.u.Path != "/":
+				buf = append(buf, h.u.Path...)
+			}
+		case 'O':
+			if connected {
+				buf = append(buf, h.u.Opaque...)
+			}
+		case 'o':
+			if connected {
+				buf = append(buf, filepath.Base(h.u.Opaque)...)
+			}
+		case 'P':
+			if connected {
+				buf = append(buf, h.u.Path...)
+			}
+		case 'p':
+			if connected {
+				buf = append(buf, path.Base(h.u.Path)...)
+			}
+		case '~': // like %/ but ~ when default database
+		case '#': // when superuser, a #, otherwise >
+			if h.tx != nil || h.batch {
+				buf = append(buf, '~')
+			} else {
+				buf = append(buf, '>')
+			}
+		// case 'p': // the process id of the connected backend -- never going to be supported
+		case 'R': // statement state
+			buf = append(buf, h.buf.State()...)
+		case 'x': // empty when not in a transaction block, * in transaction block, ! in failed transaction block, or ? when indeterminate
+		case 'l': // line number
+		case ':': // variable value
+		case '`': // value of the evaluated command
+		case '[', ']':
+		case 'w':
+		}
+		i++
 	}
-	tx := ">"
-	if h.tx != nil || h.batch {
-		tx = "~"
-	}
-	return s + h.buf.State() + tx + " "
+	return string(buf)
 }
 
 // IO returns the io for the handler.
@@ -560,7 +732,7 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 	// force error/check connection
 	if err == nil {
 		if err = drivers.Ping(ctx, h.u, h.db); err == nil {
-			h.l.Completer(drivers.NewCompleter(ctx, h.u, h.db, readerOptions(), completer.WithConnStrings(connStrings)))
+			h.l.Completer(drivers.NewCompleter(ctx, h.u, h.db, readerOpts(), completer.WithConnStrings(connStrings)))
 			return h.Version(ctx)
 		}
 	}
@@ -914,7 +1086,7 @@ func (h *Handler) query(ctx context.Context, w io.Writer, opt metacmd.Option, ty
 			}
 			w = pipe
 		}
-	} else {
+	} else if opt.Exec != metacmd.ExecWatch {
 		params["pager_cmd"] = env.All()["PAGER"]
 	}
 	useColumnTypes := drivers.UseColumnTypes(h.u)
@@ -945,16 +1117,18 @@ func (h *Handler) query(ctx context.Context, w io.Writer, opt metacmd.Option, ty
 		fmt.Fprintln(w, typ)
 	case err != nil:
 		return err
+	case params["format"] == "aligned":
+		fmt.Fprintln(w)
 	}
 	if h.timing {
 		d := time.Since(start)
 		format := text.TimingDesc
-		a := []interface{}{float64(d.Microseconds()) / 1000}
+		v := []interface{}{float64(d.Microseconds()) / 1000}
 		if d > 1*time.Second {
 			format += " (%v)"
-			a = append(a, d.Round(1*time.Millisecond))
+			v = append(v, d.Round(1*time.Millisecond))
 		}
-		h.Print(format, a)
+		h.Print(format, v...)
 	}
 	if pipe != nil {
 		pipe.Close()
@@ -983,7 +1157,7 @@ func (h *Handler) execRows(ctx context.Context, w io.Writer, rows *sql.Rows) err
 			}
 			// execute
 			for _, sqlstr := range row {
-				if err = h.Execute(ctx, w, res, stmt.FindPrefix(sqlstr), sqlstr, false); err != nil {
+				if err = h.Execute(ctx, w, res, stmt.FindPrefix(sqlstr, true, true, true), sqlstr, false); err != nil {
 					return err
 				}
 			}
@@ -1101,8 +1275,7 @@ func (h *Handler) Commit() error {
 	}
 	tx := h.tx
 	h.tx = nil
-	err := tx.Commit()
-	if err != nil {
+	if err := tx.Commit(); err != nil {
 		return drivers.WrapErr(h.u.Driver, err)
 	}
 	return nil
@@ -1118,8 +1291,7 @@ func (h *Handler) Rollback() error {
 	}
 	tx := h.tx
 	h.tx = nil
-	err := tx.Rollback()
-	if err != nil {
+	if err := tx.Rollback(); err != nil {
 		return drivers.WrapErr(h.u.Driver, err)
 	}
 	return nil
@@ -1185,24 +1357,7 @@ func (h *Handler) MetadataWriter(ctx context.Context) (metadata.Writer, error) {
 	if h.db == nil {
 		return nil, text.ErrNotConnected
 	}
-	opts := readerOptions()
-	return drivers.NewMetadataWriter(ctx, h.u, h.db, h.l.Stdout(), opts...)
-}
-
-func readerOptions() []metadata.ReaderOption {
-	var opts []metadata.ReaderOption
-	envs := env.All()
-	if envs["ECHO_HIDDEN"] == "on" || envs["ECHO_HIDDEN"] == "noexec" {
-		if envs["ECHO_HIDDEN"] == "noexec" {
-			opts = append(opts, metadata.WithDryRun(true))
-		}
-		opts = append(
-			opts,
-			metadata.WithLogger(log.New(os.Stdout, "DEBUG: ", log.LstdFlags)),
-			metadata.WithTimeout(30*time.Second),
-		)
-	}
-	return opts
+	return drivers.NewMetadataWriter(ctx, h.u, h.db, h.l.Stdout(), readerOpts()...)
 }
 
 // GetOutput gets the output writer.
@@ -1219,6 +1374,22 @@ func (h *Handler) SetOutput(o io.WriteCloser) {
 		h.out.Close()
 	}
 	h.out = o
+}
+
+func readerOpts() []metadata.ReaderOption {
+	var opts []metadata.ReaderOption
+	envs := env.All()
+	if envs["ECHO_HIDDEN"] == "on" || envs["ECHO_HIDDEN"] == "noexec" {
+		if envs["ECHO_HIDDEN"] == "noexec" {
+			opts = append(opts, metadata.WithDryRun(true))
+		}
+		opts = append(
+			opts,
+			metadata.WithLogger(log.New(os.Stdout, "DEBUG: ", log.LstdFlags)),
+			metadata.WithTimeout(30*time.Second),
+		)
+	}
+	return opts
 }
 
 // peekEnding peeks to see if the next successive bytes in r is \n or \r\n,
@@ -1252,4 +1423,12 @@ func peekEnding(w io.Writer, r *bufio.Reader) error {
 	}
 	_, werr := w.Write([]byte{'\n'})
 	return werr
+}
+
+// grab grabs i from r, or returns 0 if i >= end.
+func grab(r []rune, i, end int) rune {
+	if i < end {
+		return r[i]
+	}
+	return 0
 }
